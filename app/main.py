@@ -1,14 +1,19 @@
 import sys
 import time
 import cv2
+import os
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QVBoxLayout
 )
 from PyQt5.QtCore import QThread, pyqtSignal
+from core import ( detector as dect, notifier as notif, profiles as prof)
+from core.profiles import get_profile_dirs
 
-import frame_comparison as frmcp
-import notification_n_sound as nns
+
+
+ACTIVE_PROFILE = "Blue Archive"
+prof.create_profile(ACTIVE_PROFILE)
 
 
 # ---------------- WORKER THREAD ----------------
@@ -23,6 +28,12 @@ class MonitorThread(QThread):
         self.running = True
         self.status.emit("Monitoring...")
 
+        dirs = get_profile_dirs(ACTIVE_PROFILE)
+        
+        latest_path = os.path.join(dirs["captures"], "latest.png")
+        if os.path.exists(latest_path):
+            os.remove(latest_path)
+
         cap = cv2.VideoCapture(2, cv2.CAP_DSHOW)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
@@ -32,11 +43,23 @@ class MonitorThread(QThread):
             if not ret:
                 continue
 
-            cv2.imwrite("temp_frame_capture.png", frame)
+            #cv2.imwrite("temp_frame_capture.png", frame)
 
-            if frmcp.frame_comp():
+            if dect.frame_comp(ACTIVE_PROFILE):
                 self.status.emit("Dialogue detected!")
-                nns.alert()
+                notif.alert()
+
+            # 1️⃣ SAVE FRAME TO PROFILE
+            dirs = prof.get_profile_dirs(ACTIVE_PROFILE)
+            capture_path = os.path.join(dirs["captures"], "latest.png")
+            cv2.imwrite(capture_path, frame)
+
+             # 2️⃣ RUN DETECTION
+            if dect.frame_comp(ACTIVE_PROFILE):
+                self.status.emit("Dialogue detected!")
+                notif.alert()
+
+
 
             time.sleep(0.5)
 
@@ -77,9 +100,10 @@ class App(QWidget):
         self.thread.status.connect(self.label.setText)
 
     def select_reference(self):
-        self.label.setText("Select reference...")
-        frmcp.refrence_selector()
+        self.label.setText("Select reference…")
+        dect.refrence_selector(ACTIVE_PROFILE)
         self.label.setText("Reference saved")
+
 
     def start(self):
         if not self.thread.isRunning():

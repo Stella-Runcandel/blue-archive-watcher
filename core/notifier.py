@@ -20,3 +20,6 @@ def alert(cooldown=5):
         app_name="B.A Game Analysis",
         timeout=3
     )
+
+    # 🔊 Sound alert
+    winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)

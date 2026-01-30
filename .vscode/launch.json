@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    
+    {
+      "name": "Run B.A Game Analysis",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "app.main",
+      "console": "integratedTerminal"
+    }
+  ]
+}
