@@ -3,10 +3,30 @@ import numpy as np
 import os
 from core.profiles import get_profile_dirs
 import time
+import hashlib
+
 
 # ---- path setup (DO THIS ONCE) ----
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))   # core/
 PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, ".."))
+
+_last_signature = None
+_debug_counter = 0
+
+
+def debug_signature(frame_gray, x, y, w, h):
+    H, W = frame_gray.shape
+    x2 = min(x + w, W)
+    y2 = min(y + h, H)
+
+    roi = frame_gray[y:y2, x:x2]
+
+    roi = cv2.GaussianBlur(roi, (7, 7), 0)
+    roi = cv2.resize(roi, (32, 32))
+
+    return hashlib.sha1(roi.tobytes()).hexdigest()
+
+
 
 def refrence_selector(profile_name):
     # Load reference image (UNCHANGED)
@@ -69,16 +89,21 @@ def refrence_selector(profile_name):
     cv2.destroyAllWindows()
 
 def frame_comp(profile_name):
+    global _last_signature, _debug_counter
+
     dirs = get_profile_dirs(profile_name)
 
     frame_path = os.path.join(dirs["captures"], "latest.png")
     if not os.path.exists(frame_path):
+        _last_signature = None
         return False
 
     frame = cv2.imread(frame_path, cv2.IMREAD_GRAYSCALE)
     if frame is None:
+        _last_signature = None
         return False
 
+    frame_e = cv2.Canny(frame, 80, 160)
 
     for ref in os.listdir(dirs["references"]):
         ref_path = os.path.join(dirs["references"], ref)
@@ -86,27 +111,43 @@ def frame_comp(profile_name):
         if template is None:
             continue
 
-        # ---- your existing edge + matchTemplate logic ----
         template_e = cv2.Canny(template, 80, 160)
-        frame_e = cv2.Canny(frame, 80, 160)
 
         result = cv2.matchTemplate(
             frame_e, template_e, cv2.TM_CCOEFF_NORMED
         )
         _, max_val, _, max_loc = cv2.minMaxLoc(result)
 
-        if max_val >= 0.70:
-            x, y = max_loc
-            th, tw = template_e.shape[:2]
-            debug_path = os.path.join(
+        if max_val < 0.70:
+            continue
+
+        x, y = max_loc
+        h, w = template_e.shape[:2]
+
+        # 🔑 compute noise-tolerant signature
+        sig = debug_signature(frame, x, y, w, h)
+
+        if sig == _last_signature:
+            return True  # same dialogue, ignore
+
+        _last_signature = sig
+        _debug_counter += 1
+
+        debug = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        cv2.rectangle(
+            debug, (x, y), (x + w, y + h), (0, 255, 0), 2
+        )
+
+        debug_path = os.path.join(
             dirs["debug"],
-            f"match_{int(time.time())}.png"
-            )
+            f"match_{_debug_counter:04d}.png"
+        )
+        cv2.imwrite(debug_path, debug)
 
-            debug = cv2.cvtColor(frame_e, cv2.COLOR_GRAY2BGR)
-            cv2.rectangle(debug, (x, y), (x+tw, y+th), (0,255,0), 2)
-            cv2.imwrite(debug_path, debug)
+        return True
 
-            return True
+
+    # 🔁 reached only if NOTHING matched
+    _last_signature = None
 
     return False
