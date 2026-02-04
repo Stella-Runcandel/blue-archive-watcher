@@ -239,6 +239,54 @@ def get_profile_icon_bytes(profile_name):
     return None
 
 
+def set_profile_icon(profile_name, source_path):
+    valid, message = validate_profile_name(profile_name)
+    if not valid:
+        return False, message
+    if not source_path or not os.path.isfile(source_path):
+        return False, "Icon file not found."
+    ext = os.path.splitext(source_path)[1].lower()
+    if ext not in {".png", ".jpg", ".jpeg"}:
+        return False, "Icon must be a PNG or JPG image."
+
+    dirs = get_profile_dirs(profile_name)
+    dest_name = f"{profile_name}_profile_icon{ext}"
+    if not _is_valid_asset_name(dest_name):
+        return False, "Invalid icon filename."
+    dest_path = _safe_realpath(dirs["root"], dest_name)
+    if not dest_path:
+        return False, "Invalid icon path."
+
+    meta_path = dirs["meta"]
+    data = {"name": profile_name}
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r") as f:
+                data.update(json.load(f) or {})
+        except Exception:
+            pass
+
+    old_icon = data.get("icon")
+    if old_icon and _is_valid_asset_name(old_icon):
+        old_path = _safe_realpath(dirs["root"], old_icon)
+        if (
+            old_path
+            and os.path.isfile(old_path)
+            and os.path.abspath(old_path) != os.path.abspath(dest_path)
+        ):
+            os.remove(old_path)
+
+    os.makedirs(dirs["root"], exist_ok=True)
+    shutil.copy2(source_path, dest_path)
+    data["icon"] = dest_name
+
+    with open(meta_path, "w") as f:
+        json.dump(data, f, indent=2)
+
+    print(f"Profile icon set for '{profile_name}': {dest_name}")
+    return True, f"Profile icon set for '{profile_name}'."
+
+
 def import_frames(profile_name, file_paths):
     dirs = get_profile_dirs(profile_name)
     frames_dir = dirs["frames"]

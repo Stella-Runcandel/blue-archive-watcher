@@ -1,10 +1,14 @@
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QPushButton, QLabel, QHBoxLayout
+    QWidget, QVBoxLayout, QPushButton, QLabel, QHBoxLayout, QFileDialog
 )
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import Qt
 
 from app.ui.panel_header import PanelHeader
 from PyQt6.QtWidgets import QInputDialog, QMessageBox
 from app.controllers.profile_controller import ProfileController
+from app.app_state import app_state
+from core.profiles import get_profile_icon_bytes
 
 
 class ProfileSelectorPanel(QWidget):
@@ -25,10 +29,15 @@ class ProfileSelectorPanel(QWidget):
         create_btn = QPushButton("➕ Create New Profile")
         create_btn.clicked.connect(self.create_profile)
 
+        # ---- set profile icon button ----
+        icon_btn = QPushButton("Set / Change Profile Icon")
+        icon_btn.clicked.connect(self.set_profile_icon)
+
         # ---- main layout ----
         layout = QVBoxLayout()
         layout.addWidget(header)
         layout.addLayout(self.body_layout)
+        layout.addWidget(icon_btn)
         layout.addWidget(create_btn)
 
         self.setLayout(layout)
@@ -53,12 +62,31 @@ class ProfileSelectorPanel(QWidget):
         for name in profiles:
             row = QHBoxLayout()
 
+            icon_label = QLabel()
+            icon_label.setFixedSize(24, 24)
+            icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            data = get_profile_icon_bytes(name)
+            if data:
+                pixmap = QPixmap()
+                pixmap.loadFromData(data)
+                icon_label.setPixmap(
+                    pixmap.scaled(
+                        24,
+                        24,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                )
+            else:
+                icon_label.setText(" ")
+
             select_btn = QPushButton(name)
             select_btn.clicked.connect(lambda _, n=name: self.select_profile(n))
 
             delete_btn = QPushButton("🗑 Delete")
             delete_btn.clicked.connect(lambda _, n=name: self.delete_profile(n))
 
+            row.addWidget(icon_label)
             row.addWidget(select_btn)
             row.addWidget(delete_btn)
 
@@ -123,4 +151,38 @@ class ProfileSelectorPanel(QWidget):
                 message
             )
             return
+        self.refresh_profiles()
+
+    def set_profile_icon(self):
+        if not app_state.active_profile:
+            QMessageBox.warning(
+                self,
+                "Set Profile Icon",
+                "Select a profile first."
+            )
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Profile Icon",
+            "",
+            "Images (*.png *.jpg *.jpeg)"
+        )
+        if not file_path:
+            return
+        success, message = self.profile_controller.set_profile_icon(
+            app_state.active_profile,
+            file_path
+        )
+        if not success:
+            QMessageBox.warning(
+                self,
+                "Set Profile Icon",
+                message
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Set Profile Icon",
+            message
+        )
         self.refresh_profiles()

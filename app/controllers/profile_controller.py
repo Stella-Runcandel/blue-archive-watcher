@@ -1,5 +1,10 @@
 from app.app_state import app_state
-from core.profiles import create_profile, delete_profile, list_profiles
+from core.profiles import (
+    create_profile,
+    delete_profile,
+    list_profiles,
+    set_profile_icon,
+)
 
 
 class ProfileController:    
@@ -40,3 +45,9 @@ class ProfileController:
             return False, "You cannot delete the active profile."
         success, message = delete_profile(name)
         return success, message
+
+    def set_profile_icon(self, name, source_path):
+        """Mutates: profile metadata. Does NOT mutate: app_state. Returns: (bool, str)."""
+        if app_state.monitoring_active:
+            return False, "Stop monitoring before changing profile icons."
+        return set_profile_icon(name, source_path)
