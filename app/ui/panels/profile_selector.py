@@ -40,11 +40,11 @@ class ProfileSelectorPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        success, message = self.profile_controller.list_profiles()
+        success, profiles, message = self.profile_controller.list_profiles()
+
         if not success:
             self.body_layout.addWidget(QLabel(message))
             return
-        profiles = message.split("\n") if message else []
 
         if not profiles:
             self.body_layout.addWidget(QLabel("No profiles found"))
@@ -52,12 +52,16 @@ class ProfileSelectorPanel(QWidget):
 
         for name in profiles:
             row = QHBoxLayout()
+
             select_btn = QPushButton(name)
             select_btn.clicked.connect(lambda _, n=name: self.select_profile(n))
+
             delete_btn = QPushButton("🗑 Delete")
             delete_btn.clicked.connect(lambda _, n=name: self.delete_profile(n))
+
             row.addWidget(select_btn)
             row.addWidget(delete_btn)
+
             self.body_layout.addLayout(row)
 
     def select_profile(self, name):

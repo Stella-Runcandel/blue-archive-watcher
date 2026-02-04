@@ -2,11 +2,16 @@ from app.app_state import app_state
 from core.profiles import create_profile, delete_profile, list_profiles
 
 
-class ProfileController:
+class ProfileController:    
     def list_profiles(self):
-        """Mutates: none. Does NOT mutate: app_state. Returns: (bool, str)."""
+        """
+        Mutates: none.
+        Does NOT mutate: app_state.
+        Returns: (bool, list[str], str)
+        """
         profiles = list_profiles()
-        return True, "\n".join(profiles)
+        return True, profiles, "Profiles loaded"
+
 
     def select_profile(self, name):
         """Mutates: active_profile, selected_frame, selected_reference. Does NOT mutate: monitoring_active. Returns: (bool, str)."""
