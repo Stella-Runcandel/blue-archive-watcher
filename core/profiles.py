@@ -100,3 +100,220 @@ def delete_profile(profile_name):
         return False, "Profile not found."
     shutil.rmtree(target)
     return True, f"Profile '{profile_name}' deleted."
+
+
+def _is_valid_asset_name(name):
+    if not name:
+        return False
+    if name in {".", ".."}:
+        return False
+    if os.path.sep in name or (os.path.altsep and os.path.altsep in name):
+        return False
+    if name != os.path.basename(name):
+        return False
+    return True
+
+
+def _safe_realpath(base_dir, name):
+    path = os.path.realpath(os.path.join(base_dir, name))
+    base = os.path.realpath(base_dir)
+    if not path.startswith(base + os.path.sep):
+        return None
+    return path
+
+
+def list_frames(profile_name):
+    dirs = get_profile_dirs(profile_name)
+    frames_dir = dirs["frames"]
+    if not os.path.isdir(frames_dir):
+        return []
+    frames = [
+        f for f in os.listdir(frames_dir)
+        if f.lower().endswith((".png", ".jpg", ".jpeg"))
+    ]
+    return sorted(frames, key=str.lower)
+
+
+def list_references(profile_name):
+    dirs = get_profile_dirs(profile_name)
+    ref_dir = dirs["references"]
+    if not os.path.isdir(ref_dir):
+        return []
+    refs = [
+        f for f in os.listdir(ref_dir)
+        if f.lower().endswith(".png")
+    ]
+    return sorted(refs, key=str.lower)
+
+
+def list_debug_frames(profile_name):
+    dirs = get_profile_dirs(profile_name)
+    debug_dir = dirs["debug"]
+    if not os.path.isdir(debug_dir):
+        return []
+    files = [
+        f for f in os.listdir(debug_dir)
+        if f.lower().endswith(".png")
+    ]
+    return sorted(files, key=str.lower)
+
+
+def get_reference_parent_frame(profile_name, ref_name):
+    dirs = get_profile_dirs(profile_name)
+    meta_path = os.path.join(
+        dirs["references"],
+        ref_name.replace(".png", ".json")
+    )
+
+    if not os.path.exists(meta_path):
+        return "legacy"
+
+    try:
+        with open(meta_path, "r") as f:
+            content = f.read().strip()
+            if not content:
+                return "legacy"
+            data = json.loads(content)
+            return data.get("parent_frame", "legacy")
+    except Exception:
+        return "legacy"
+
+
+def _load_image_bytes(path):
+    if not path or not os.path.exists(path):
+        return None
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+def get_frame_image_bytes(profile_name, frame_name):
+    if not _is_valid_asset_name(frame_name):
+        return None
+    dirs = get_profile_dirs(profile_name)
+    frame_path = _safe_realpath(dirs["frames"], frame_name)
+    return _load_image_bytes(frame_path)
+
+
+def get_reference_image_bytes(profile_name, ref_name):
+    if not _is_valid_asset_name(ref_name):
+        return None
+    dirs = get_profile_dirs(profile_name)
+    ref_path = _safe_realpath(dirs["references"], ref_name)
+    return _load_image_bytes(ref_path)
+
+
+def get_debug_image_bytes(profile_name, debug_name):
+    if not _is_valid_asset_name(debug_name):
+        return None
+    dirs = get_profile_dirs(profile_name)
+    debug_path = _safe_realpath(dirs["debug"], debug_name)
+    return _load_image_bytes(debug_path)
+
+
+def get_profile_icon_bytes(profile_name):
+    dirs = get_profile_dirs(profile_name)
+    meta_path = dirs["meta"]
+    candidates = []
+
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r") as f:
+                data = json.load(f)
+            icon_name = data.get("icon")
+            if icon_name and _is_valid_asset_name(icon_name):
+                candidates.append(icon_name)
+        except Exception:
+            pass
+
+    candidates.extend(["icon.png", "icon.jpg", "icon.jpeg"])
+    for name in candidates:
+        icon_path = _safe_realpath(dirs["root"], name)
+        data = _load_image_bytes(icon_path)
+        if data:
+            return data
+    return None
+
+
+def import_frames(profile_name, file_paths):
+    dirs = get_profile_dirs(profile_name)
+    frames_dir = dirs["frames"]
+    added = 0
+    for src in file_paths:
+        if not os.path.isfile(src):
+            continue
+        name = os.path.basename(src)
+        dst = os.path.join(frames_dir, name)
+        if not os.path.exists(dst):
+            shutil.copy2(src, dst)
+            added += 1
+    return added
+
+
+def delete_reference_files(profile_name, ref_name):
+    if not _is_valid_asset_name(ref_name):
+        return False, "Invalid reference name."
+    dirs = get_profile_dirs(profile_name)
+    ref_dir = dirs["references"]
+    ref_path = _safe_realpath(ref_dir, ref_name)
+    if not ref_path or not os.path.exists(ref_path):
+        return False, "Reference not found."
+    if os.path.isfile(ref_path):
+        os.remove(ref_path)
+
+    meta_name = f"{os.path.splitext(ref_name)[0]}.json"
+    meta_path = _safe_realpath(ref_dir, meta_name)
+    if meta_path and os.path.exists(meta_path) and os.path.isfile(meta_path):
+        os.remove(meta_path)
+    return True, f"Reference '{ref_name}' deleted."
+
+
+def delete_frame_and_references(profile_name, frame_name):
+    if not _is_valid_asset_name(frame_name):
+        return False, "Invalid frame name.", []
+    dirs = get_profile_dirs(profile_name)
+    frame_dir = dirs["frames"]
+    frame_path = _safe_realpath(frame_dir, frame_name)
+    if not frame_path or not os.path.exists(frame_path):
+        return False, "Frame not found.", []
+    if os.path.isfile(frame_path):
+        os.remove(frame_path)
+
+    deleted_refs = []
+    for ref_name in list_references(profile_name):
+        parent_frame = get_reference_parent_frame(profile_name, ref_name)
+        if parent_frame == frame_name:
+            success, _ = delete_reference_files(profile_name, ref_name)
+            if success:
+                deleted_refs.append(ref_name)
+
+    if deleted_refs:
+        message = (
+            f"Frame '{frame_name}' deleted "
+            f"({len(deleted_refs)} references removed)."
+        )
+    else:
+        message = f"Frame '{frame_name}' deleted."
+    return True, message, deleted_refs
+
+
+def delete_all_debug_frames(profile_name):
+    dirs = get_profile_dirs(profile_name)
+    debug_dir = dirs["debug"]
+    deleted = 0
+    if not os.path.isdir(debug_dir):
+        return deleted
+    for name in os.listdir(debug_dir):
+        path = os.path.join(debug_dir, name)
+        if (
+            os.path.isfile(path)
+            and name.lower().endswith(".png")
+            and os.path.abspath(path).startswith(os.path.abspath(debug_dir))
+        ):
+            os.remove(path)
+            deleted += 1
+    return deleted

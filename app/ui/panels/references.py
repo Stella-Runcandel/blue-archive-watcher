@@ -3,14 +3,21 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea
+    QScrollArea,
+    QHBoxLayout,
+    QMessageBox
 )
-import os
-import json
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import Qt
 
 from app.ui.panel_header import PanelHeader
 from app.app_state import app_state
-from core.profiles import get_profile_dirs
+from app.controllers.reference_controller import ReferenceController
+from core.profiles import (
+    list_references,
+    get_reference_parent_frame,
+    get_reference_image_bytes
+)
 
 
 class ReferencesPanel(QWidget):
@@ -26,10 +33,18 @@ class ReferencesPanel(QWidget):
         super().__init__()
         self.selected_btn = None
         self.nav = nav
+        self.reference_controller = ReferenceController()
+        self.preview_bytes = None
 
         header = PanelHeader("References", nav)
 
         self.info_label = QLabel("Selected reference: None")
+        self.preview_label = QLabel("No reference preview")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setMinimumHeight(220)
+        self.preview_label.setStyleSheet(
+            "border: 1px solid #3a3a3a; color: #aaa;"
+        )
 
         self.body_layout = QVBoxLayout()
 
@@ -49,6 +64,7 @@ class ReferencesPanel(QWidget):
         layout = QVBoxLayout()
         layout.addWidget(header)
         layout.addWidget(self.info_label)
+        layout.addWidget(self.preview_label)
         layout.addWidget(scroll)
         layout.addWidget(self.new_ref_btn)
 
@@ -78,65 +94,61 @@ class ReferencesPanel(QWidget):
         profile = app_state.active_profile
         if not profile:
             self.body_layout.addWidget(QLabel("No profile selected"))
+            self.info_label.setText("Selected reference: None")
+            self.update_preview(None)
             return
-
-        dirs = get_profile_dirs(profile)
-        ref_dir = dirs["references"]
-
-        refs = sorted(
-            f for f in os.listdir(ref_dir)
-            if f.lower().endswith(".png")
-        )
+        refs = list_references(profile)
 
         if not refs:
             self.body_layout.addWidget(QLabel("No references found"))
+            self.info_label.setText("Selected reference: None")
+            self.update_preview(None)
             return
 
         for ref in refs:
-            parent = self.get_parent_frame(ref)
-            btn = QPushButton(f"{ref}  ←  {parent}")
-            btn.clicked.connect(lambda _, r=ref: self.select_reference(r))
-            self.body_layout.addWidget(btn)
+            parent = get_reference_parent_frame(profile, ref)
+            row = QHBoxLayout()
+            select_btn = QPushButton(f"{ref}  ←  {parent}")
+            select_btn.clicked.connect(
+                lambda _, r=ref: self.select_reference(r)
+            )
 
-    def get_parent_frame(self, ref_name):
-        """
-        Safely get parent frame for a reference.
-        Handles legacy references with missing / empty / broken metadata.
-        """
-        profile = app_state.active_profile
-        dirs = get_profile_dirs(profile)
+            delete_btn = QPushButton("🗑 Delete")
+            delete_btn.clicked.connect(
+                lambda _, r=ref: self.delete_reference(r)
+            )
 
-        meta_path = os.path.join(
-            dirs["references"],
-            ref_name.replace(".png", ".json")
-        )
+            row.addWidget(select_btn)
+            row.addWidget(delete_btn)
+            self.body_layout.addLayout(row)
 
-        # No metadata file at all → legacy reference
-        if not os.path.exists(meta_path):
-            return "legacy"
+            if app_state.selected_reference == ref:
+                self.selected_btn = select_btn
+                self.selected_btn.setStyleSheet(
+                    "font-weight: bold; background-color: #2d6cdf; color: white;"
+                )
 
-        try:
-            with open(meta_path, "r") as f:
-                content = f.read().strip()
-
-                # Empty file → legacy
-                if not content:
-                    return "legacy"
-
-                data = json.loads(content)
-                return data.get("parent_frame", "legacy")
-
-        except Exception:
-            # ANY failure = legacy reference
-            return "legacy"
+        if app_state.selected_reference:
+            self.info_label.setText(
+                f"Selected reference: {app_state.selected_reference}"
+            )
+        else:
+            self.info_label.setText("Selected reference: None")
+        self.update_preview(app_state.selected_reference)
 
 
     # ---------------- Actions ----------------
 
     def select_reference(self, ref_name):
-        if app_state.monitoring_active:
+        success, message = self.reference_controller.select_reference(ref_name)
+        if not success:
+            QMessageBox.warning(
+                self,
+                "Select Reference",
+                message
+            )
             return
-        app_state.selected_reference = ref_name
+        self.update_preview(ref_name)
         self.info_label.setText(f"Selected reference: {ref_name}")
 
         if self.selected_btn:
@@ -166,3 +178,58 @@ class ReferencesPanel(QWidget):
             self.new_ref_btn.setText(
                 "➕ New Reference (select a frame first)"
             )
+
+    def delete_reference(self, ref_name):
+        confirm = QMessageBox.question(
+            self,
+            "Delete Reference",
+            f"Delete reference '{ref_name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        success, message = self.reference_controller.delete_reference(ref_name)
+        if not success:
+            QMessageBox.warning(
+                self,
+                "Delete Reference",
+                message
+            )
+            return
+        self.selected_btn = None
+        self.refresh()
+
+    def update_preview(self, ref_name):
+        if not ref_name:
+            self.preview_bytes = None
+            self.preview_label.setText("No reference preview")
+            self.preview_label.setPixmap(QPixmap())
+            return
+        data = get_reference_image_bytes(app_state.active_profile, ref_name)
+        if not data:
+            self.preview_bytes = None
+            self.preview_label.setText("Reference preview unavailable")
+            self.preview_label.setPixmap(QPixmap())
+            return
+        self.preview_bytes = data
+        pixmap = QPixmap()
+        pixmap.loadFromData(data)
+        scaled = pixmap.scaled(
+            self.preview_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.preview_label.setPixmap(scaled)
+        self.preview_label.setText("")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.preview_bytes:
+            pixmap = QPixmap()
+            pixmap.loadFromData(self.preview_bytes)
+            scaled = pixmap.scaled(
+                self.preview_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.preview_label.setPixmap(scaled)

@@ -1,7 +1,9 @@
 from PyQt6.QtWidgets import QWidget, QPushButton, QLabel, QVBoxLayout
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import Qt
 
 from core import detector as dect
-from core.profiles import list_profiles
+from core.profiles import list_profiles, get_profile_icon_bytes
 
 from app.app_state import app_state
 from app.services.monitor_service import MonitorService
@@ -26,6 +28,13 @@ class DashboardPanel(QWidget):
         self.profile_label = QLabel("Profile: None")
         self.frame_label = QLabel("Selected Frame: None")
         self.ref_label = QLabel("Selected Reference: None")
+        self.profile_preview_bytes = None
+        self.profile_preview = QLabel("No profile preview")
+        self.profile_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.profile_preview.setMinimumHeight(180)
+        self.profile_preview.setStyleSheet(
+            "border: 1px solid #3a3a3a; color: #aaa;"
+        )
         self.monitor_label = QLabel("Monitoring: Stopped")
         self.status_label = QLabel("Status: Idle")
 
@@ -38,6 +47,7 @@ class DashboardPanel(QWidget):
         layout.addWidget(self.profile_label)
         layout.addWidget(self.frame_label)
         layout.addWidget(self.ref_label)
+        layout.addWidget(self.profile_preview)
         layout.addWidget(self.monitor_label)
         layout.addWidget(self.status_label)
         layout.addWidget(self.start_btn)
@@ -150,3 +160,40 @@ class DashboardPanel(QWidget):
             app_state.selected_reference is not None
             and not self.monitor.isRunning()
         )
+        self.update_profile_preview()
+
+    def update_profile_preview(self):
+        if not app_state.active_profile:
+            self.profile_preview_bytes = None
+            self.profile_preview.setText("No profile preview")
+            self.profile_preview.setPixmap(QPixmap())
+            return
+        data = get_profile_icon_bytes(app_state.active_profile)
+        if not data:
+            self.profile_preview_bytes = None
+            self.profile_preview.setText("Profile icon not found")
+            self.profile_preview.setPixmap(QPixmap())
+            return
+        self.profile_preview_bytes = data
+        pixmap = QPixmap()
+        pixmap.loadFromData(data)
+        scaled = pixmap.scaled(
+            self.profile_preview.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.profile_preview.setPixmap(scaled)
+        self.profile_preview.setText("")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self.profile_preview_bytes:
+            return
+        pixmap = QPixmap()
+        pixmap.loadFromData(self.profile_preview_bytes)
+        scaled = pixmap.scaled(
+            self.profile_preview.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.profile_preview.setPixmap(scaled)

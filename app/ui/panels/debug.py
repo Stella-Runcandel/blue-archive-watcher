@@ -1,19 +1,34 @@
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QPushButton, QScrollArea
+    QWidget, QVBoxLayout, QLabel, QPushButton, QScrollArea, QHBoxLayout
 )
-import os
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import Qt
 
 from app.ui.panel_header import PanelHeader
 from app.app_state import app_state
-from core.profiles import get_profile_dirs
+from core.profiles import (
+    list_debug_frames,
+    get_debug_image_bytes,
+    delete_all_debug_frames
+)
 
 
 class DebugPanel(QWidget):
     def __init__(self, nav):
         super().__init__()
         self.nav = nav
+        self.selected_btn = None
+        self.selected_debug = None
+        self.preview_bytes = None
 
         header = PanelHeader("Debug Frames", nav)
+
+        self.preview_label = QLabel("No debug preview")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setMinimumHeight(220)
+        self.preview_label.setStyleSheet(
+            "border: 1px solid #3a3a3a; color: #aaa;"
+        )
 
         self.body_layout = QVBoxLayout()
         self.refresh_debug()
@@ -30,6 +45,7 @@ class DebugPanel(QWidget):
 
         layout = QVBoxLayout()
         layout.addWidget(header)
+        layout.addWidget(self.preview_label)
         layout.addWidget(scroll)
         layout.addWidget(delete_btn)
 
@@ -44,47 +60,89 @@ class DebugPanel(QWidget):
         profile = app_state.active_profile
         if not profile:
             self.body_layout.addWidget(QLabel("No profile selected"))
+            self.update_preview(None)
             return
 
-        dirs = get_profile_dirs(profile)
-        debug_dir = dirs["debug"]
-
-        files = sorted(
-            f for f in os.listdir(debug_dir)
-            if f.lower().endswith(".png")
-        )
+        files = list_debug_frames(profile)
 
         if not files:
             self.body_layout.addWidget(QLabel("No debug frames found"))
+            self.update_preview(None)
             return
 
         for f in files:
-            self.body_layout.addWidget(QLabel(f))
+            row = QHBoxLayout()
+            select_btn = QPushButton(f)
+            select_btn.clicked.connect(
+                lambda _, n=f: self.select_debug(n)
+            )
+            row.addWidget(select_btn)
+            self.body_layout.addLayout(row)
+
+            if self.selected_debug == f:
+                self.selected_btn = select_btn
+                self.selected_btn.setStyleSheet(
+                    "font-weight: bold; background-color: #2d6cdf; color: white;"
+                )
+
+        if self.selected_debug not in files:
+            self.selected_debug = None
+            self.selected_btn = None
+            self.update_preview(None)
 
     def delete_all(self):
         profile = app_state.active_profile
         if not profile:
             return
-
-        dirs = get_profile_dirs(profile)
-        debug_dir = dirs["debug"]
-
-        # SAFETY CHECKS
-        if not os.path.exists(debug_dir):
-            return
-
-        if not os.path.isdir(debug_dir):
-            return
-
-        # only delete png files in THIS directory
-        for name in os.listdir(debug_dir):
-            path = os.path.join(debug_dir, name)
-
-            if (
-                os.path.isfile(path)
-                and name.lower().endswith(".png")
-                and path.startswith(os.path.abspath(debug_dir))
-            ):
-                os.remove(path)
-
+        delete_all_debug_frames(profile)
+        self.selected_debug = None
+        self.selected_btn = None
+        self.update_preview(None)
         self.refresh_debug()
+
+    def select_debug(self, debug_name):
+        self.selected_debug = debug_name
+        self.update_preview(debug_name)
+
+        if self.selected_btn:
+            self.selected_btn.setStyleSheet("")
+
+        self.selected_btn = self.sender()
+        self.selected_btn.setStyleSheet(
+            "font-weight: bold; background-color: #2d6cdf; color: white;"
+        )
+
+    def update_preview(self, debug_name):
+        if not debug_name:
+            self.preview_bytes = None
+            self.preview_label.setText("No debug preview")
+            self.preview_label.setPixmap(QPixmap())
+            return
+        data = get_debug_image_bytes(app_state.active_profile, debug_name)
+        if not data:
+            self.preview_bytes = None
+            self.preview_label.setText("Debug preview unavailable")
+            self.preview_label.setPixmap(QPixmap())
+            return
+        self.preview_bytes = data
+        pixmap = QPixmap()
+        pixmap.loadFromData(data)
+        scaled = pixmap.scaled(
+            self.preview_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.preview_label.setPixmap(scaled)
+        self.preview_label.setText("")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.preview_bytes:
+            pixmap = QPixmap()
+            pixmap.loadFromData(self.preview_bytes)
+            scaled = pixmap.scaled(
+                self.preview_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.preview_label.setPixmap(scaled)

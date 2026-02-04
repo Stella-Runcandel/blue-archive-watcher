@@ -4,14 +4,21 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPushButton,
     QFileDialog,
-    QScrollArea
+    QScrollArea,
+    QHBoxLayout,
+    QMessageBox
 )
-import os
-import shutil
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import Qt
 
 from app.ui.panel_header import PanelHeader
 from app.app_state import app_state
-from core.profiles import get_profile_dirs
+from app.controllers.frame_controller import FrameController
+from core.profiles import (
+    import_frames,
+    list_frames,
+    get_frame_image_bytes
+)
 
 
 class FramesPanel(QWidget):
@@ -26,10 +33,18 @@ class FramesPanel(QWidget):
         super().__init__()
         self.selected_btn = None
         self.nav = nav
+        self.frame_controller = FrameController()
+        self.preview_bytes = None
 
         header = PanelHeader("Frames", nav)
 
         self.selected_label = QLabel("Selected frame: None")
+        self.preview_label = QLabel("No frame preview")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setMinimumHeight(220)
+        self.preview_label.setStyleSheet(
+            "border: 1px solid #3a3a3a; color: #aaa;"
+        )
 
         self.body_layout = QVBoxLayout()
         self.refresh_frames()
@@ -47,6 +62,7 @@ class FramesPanel(QWidget):
         layout = QVBoxLayout()
         layout.addWidget(header)
         layout.addWidget(self.selected_label)
+        layout.addWidget(self.preview_label)
         layout.addWidget(scroll)
         layout.addWidget(add_btn)
 
@@ -62,26 +78,47 @@ class FramesPanel(QWidget):
         profile = app_state.active_profile
         if not profile:
             self.body_layout.addWidget(QLabel("No profile selected"))
+            self.selected_label.setText("Selected frame: None")
+            self.update_preview(None)
             return
 
-        dirs = get_profile_dirs(profile)
-        frames_dir = dirs["frames"]
-
-        frames = sorted(
-            f for f in os.listdir(frames_dir)
-            if f.lower().endswith((".png", ".jpg", ".jpeg"))
-        )
+        frames = list_frames(profile)
 
         if not frames:
             self.body_layout.addWidget(QLabel("No frames uploaded"))
+            self.selected_label.setText("Selected frame: None")
+            self.update_preview(None)
             return
 
         for frame in frames:
-            btn = QPushButton(frame)
-            btn.clicked.connect(
+            row = QHBoxLayout()
+            select_btn = QPushButton(frame)
+            select_btn.clicked.connect(
                 lambda _, f=frame: self.select_frame(f)
             )
-            self.body_layout.addWidget(btn)
+
+            delete_btn = QPushButton("🗑 Delete")
+            delete_btn.clicked.connect(
+                lambda _, f=frame: self.delete_frame(f)
+            )
+
+            row.addWidget(select_btn)
+            row.addWidget(delete_btn)
+            self.body_layout.addLayout(row)
+
+            if app_state.selected_frame == frame:
+                self.selected_btn = select_btn
+                self.selected_btn.setStyleSheet(
+                    "font-weight: bold; background-color: #2d6cdf; color: white;"
+                )
+
+        if app_state.selected_frame:
+            self.selected_label.setText(
+                f"Selected frame: {app_state.selected_frame}"
+            )
+        else:
+            self.selected_label.setText("Selected frame: None")
+        self.update_preview(app_state.selected_frame)
 
     def add_frames(self):
         profile = app_state.active_profile
@@ -98,24 +135,21 @@ class FramesPanel(QWidget):
         if not files:
             return
 
-        dirs = get_profile_dirs(profile)
-        frames_dir = dirs["frames"]
-
-        for src in files:
-            name = os.path.basename(src)
-            dst = os.path.join(frames_dir, name)
-
-            # avoid overwrite
-            if not os.path.exists(dst):
-                shutil.copy2(src, dst)
+        import_frames(profile, files)
 
         self.refresh_frames()
 
     def select_frame(self, frame_name):
-        if app_state.monitoring_active:
+        success, message = self.frame_controller.select_frame(frame_name)
+        if not success:
+            QMessageBox.warning(
+                self,
+                "Select Frame",
+                message
+            )
             return
-        app_state.selected_frame = frame_name
         self.selected_label.setText(f"Selected frame: {frame_name}")
+        self.update_preview(frame_name)
 
         if self.selected_btn:
             self.selected_btn.setStyleSheet("")
@@ -124,3 +158,58 @@ class FramesPanel(QWidget):
         self.selected_btn.setStyleSheet(
             "font-weight: bold; background-color: #2d6cdf; color: white;"
         )
+
+    def delete_frame(self, frame_name):
+        confirm = QMessageBox.question(
+            self,
+            "Delete Frame",
+            f"Delete frame '{frame_name}' and its derived references?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        success, message = self.frame_controller.delete_frame(frame_name)
+        if not success:
+            QMessageBox.warning(
+                self,
+                "Delete Frame",
+                message
+            )
+            return
+        self.selected_btn = None
+        self.refresh_frames()
+
+    def update_preview(self, frame_name):
+        if not frame_name:
+            self.preview_bytes = None
+            self.preview_label.setText("No frame preview")
+            self.preview_label.setPixmap(QPixmap())
+            return
+        data = get_frame_image_bytes(app_state.active_profile, frame_name)
+        if not data:
+            self.preview_bytes = None
+            self.preview_label.setText("Frame preview unavailable")
+            self.preview_label.setPixmap(QPixmap())
+            return
+        self.preview_bytes = data
+        pixmap = QPixmap()
+        pixmap.loadFromData(data)
+        scaled = pixmap.scaled(
+            self.preview_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.preview_label.setPixmap(scaled)
+        self.preview_label.setText("")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.preview_bytes:
+            pixmap = QPixmap()
+            pixmap.loadFromData(self.preview_bytes)
+            scaled = pixmap.scaled(
+                self.preview_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.preview_label.setPixmap(scaled)
