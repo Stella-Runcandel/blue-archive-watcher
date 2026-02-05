@@ -1,7 +1,12 @@
 import cv2
 import os
 import time
-from core.profiles import get_profile_dirs, get_debug_dir, profile_path
+from core.profiles import (
+    get_profile_dirs,
+    get_debug_dir,
+    profile_path,
+    get_detection_threshold,
+)
 
 # ---- dialogue state ----
 _active_dialogue = None        # name of reference currently active
@@ -115,7 +120,7 @@ def frame_comp(profile_name):
         result = cv2.matchTemplate(frame_e, template_e, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(result)
 
-        if max_val < 0.70:
+        if max_val < get_detection_threshold(profile_name):
             continue
 
         x, y = max_loc

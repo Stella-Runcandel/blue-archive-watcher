@@ -7,6 +7,9 @@ import shutil
 BASE_DIR = os.path.join("Data", "Profiles")
 DEBUG_FALLBACK_DIR = os.path.join("Data", "Debug")
 DEBUG_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
+DEFAULT_DETECTION_THRESHOLD = 0.70
+MIN_DETECTION_THRESHOLD = 0.50
+MAX_DETECTION_THRESHOLD = 0.95
 
 def profile_path(name):
     return os.path.join(BASE_DIR, name)
@@ -141,6 +144,56 @@ def get_debug_dir(profile_name, allow_fallback=False):
         os.makedirs(DEBUG_FALLBACK_DIR, exist_ok=True)
         return DEBUG_FALLBACK_DIR, True
     return None, False
+
+
+def _clamp_detection_threshold(value):
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = DEFAULT_DETECTION_THRESHOLD
+    return max(MIN_DETECTION_THRESHOLD, min(MAX_DETECTION_THRESHOLD, numeric))
+
+
+def get_detection_threshold(profile_name):
+    threshold = None
+    if profile_name:
+        dirs = get_profile_dirs(profile_name)
+        meta_path = dirs["meta"]
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r") as f:
+                    data = json.load(f) or {}
+                if "detection_threshold" in data:
+                    threshold = data.get("detection_threshold")
+            except Exception:
+                threshold = None
+    if threshold is None:
+        threshold = DEFAULT_DETECTION_THRESHOLD
+    return _clamp_detection_threshold(threshold)
+
+
+def update_profile_detection_threshold(profile_name, threshold):
+    if not profile_name:
+        return False
+    dirs = get_profile_dirs(profile_name)
+    meta_path = dirs["meta"]
+    data = {"name": profile_name}
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r") as f:
+                data.update(json.load(f) or {})
+        except Exception:
+            pass
+    threshold_value = _clamp_detection_threshold(threshold)
+    if threshold_value == DEFAULT_DETECTION_THRESHOLD:
+        if "detection_threshold" not in data:
+            return False
+        data.pop("detection_threshold", None)
+    else:
+        data["detection_threshold"] = threshold_value
+    with open(meta_path, "w") as f:
+        json.dump(data, f, indent=2)
+    return True
 
 
 def list_frames(profile_name):

@@ -1,9 +1,21 @@
-from PyQt6.QtWidgets import QWidget, QPushButton, QLabel, QVBoxLayout
+from PyQt6.QtWidgets import (
+    QWidget,
+    QPushButton,
+    QLabel,
+    QVBoxLayout,
+    QComboBox,
+    QHBoxLayout,
+)
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtCore import Qt
 
 from core import detector as dect
-from core.profiles import list_profiles, get_profile_icon_bytes
+from core.profiles import (
+    list_profiles,
+    get_profile_icon_bytes,
+    get_detection_threshold,
+    update_profile_detection_threshold,
+)
 
 from app.app_state import app_state
 from app.services.monitor_service import MonitorService
@@ -19,6 +31,15 @@ class DashboardPanel(QWidget):
     - Start / stop monitoring
     - Entry point to other panels
     """
+
+    STRICTNESS_OPTIONS = [
+        ("Very Loose", 0.55),
+        ("Loose", 0.65),
+        ("Balanced", 0.70),
+        ("Strict", 0.80),
+        ("Very Strict", 0.88),
+        ("Extreme", 0.93),
+    ]
 
     def __init__(self, nav):
         super().__init__()
@@ -37,6 +58,10 @@ class DashboardPanel(QWidget):
         )
         self.monitor_label = QLabel("Monitoring: Stopped")
         self.status_label = QLabel("Status: Idle")
+        self.strictness_label = QLabel("Detection Strictness")
+        self.strictness_combo = QComboBox()
+        for label, _ in self.STRICTNESS_OPTIONS:
+            self.strictness_combo.addItem(label)
 
         # ---- action buttons ----
         self.start_btn = QPushButton("▶ Start Monitoring")
@@ -44,7 +69,14 @@ class DashboardPanel(QWidget):
 
         # ---- layout ----
         layout = QVBoxLayout()
-        layout.addWidget(self.profile_label)
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(self.profile_label)
+        profile_row.addStretch(1)
+        layout.addLayout(profile_row)
+        strictness_row = QHBoxLayout()
+        strictness_row.addWidget(self.strictness_label)
+        strictness_row.addWidget(self.strictness_combo)
+        layout.addLayout(strictness_row)
         layout.addWidget(self.frame_label)
         layout.addWidget(self.ref_label)
         layout.addWidget(self.profile_preview)
@@ -64,6 +96,9 @@ class DashboardPanel(QWidget):
         # ---- signals ----
         self.start_btn.clicked.connect(self.start)
         self.stop_btn.clicked.connect(self.stop)
+        self.strictness_combo.currentIndexChanged.connect(
+            self.on_strictness_changed
+        )
 
         # initial state
         self.refresh()
@@ -160,7 +195,37 @@ class DashboardPanel(QWidget):
             app_state.selected_reference is not None
             and not self.monitor.isRunning()
         )
+        self.update_detection_strictness()
         self.update_profile_preview()
+
+    def update_detection_strictness(self):
+        profile = app_state.active_profile
+        resolved = get_detection_threshold(profile)
+        index = self._strictness_index_for_threshold(resolved)
+        self.strictness_combo.blockSignals(True)
+        self.strictness_combo.setCurrentIndex(index)
+        self.strictness_combo.blockSignals(False)
+        self.strictness_combo.setEnabled(bool(profile))
+
+    def _strictness_index_for_threshold(self, threshold):
+        try:
+            target = float(threshold)
+        except (TypeError, ValueError):
+            target = get_detection_threshold(None)
+        distances = [
+            abs(target - value)
+            for _, value in self.STRICTNESS_OPTIONS
+        ]
+        return distances.index(min(distances))
+
+    def on_strictness_changed(self, index):
+        if index < 0:
+            return
+        profile = app_state.active_profile
+        if not profile:
+            return
+        _, threshold = self.STRICTNESS_OPTIONS[index]
+        update_profile_detection_threshold(profile, threshold)
 
     def update_profile_preview(self):
         if not app_state.active_profile:
