@@ -35,7 +35,6 @@ class AppShell(QWidget):
         self.nav_bar = NavBar()
 
         self.setStyleSheet(
-<<<<<<< codex/update-application-stylesheet-for-warm-colors-9vk74y
             "QWidget { background-color: #2f2a25; color: #d8d1c8; }"
             "QPushButton {"
             " background-color: #3a352f; color: #d8d1c8; border: 1px solid #595148;"
@@ -54,11 +53,6 @@ class AppShell(QWidget):
         self.icon_shortcut = QShortcut(QKeySequence("Ctrl+Shift+I"), self)
         self.icon_shortcut.activated.connect(self.choose_app_icon)
 
-=======
-            "QPushButton:hover { background-color: #7a889a; }"
-        )
-
->>>>>>> main
         root_layout.addLayout(self.stack)
         root_layout.addWidget(self.nav_bar)
 

@@ -120,17 +120,8 @@ class DashboardPanel(QWidget):
             return
 
         self.label.setText("Select reference region…")
-        dect.refrence_selector(app_state.active_profile)
-
-        # 🔍 show result clearly
-        from core.profiles import get_profile_dirs
-        import os
-
-        refs = os.listdir(get_profile_dirs(app_state.active_profile)["references"])
-        if refs:
-            self.label.setText(f"Reference added: {refs[-1]}")
-        else:
-            self.label.setText("No reference saved")
+        _, message = dect.refrence_selector(app_state.active_profile)
+        self.label.setText(message)
 
     def start(self):
         if app_state.monitoring_active:

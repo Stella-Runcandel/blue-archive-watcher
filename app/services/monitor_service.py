@@ -34,25 +34,28 @@ class MonitorService(QThread):
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
-        if not cap.isOpened():
-            self.status.emit("Camera failed")
-            return
+        try:
+            if not cap.isOpened():
+                self.status.emit("Camera failed")
+                return
 
-        while self.running:
-            ret, frame = cap.read()
-            if not ret:
-                continue
+            while self.running:
+                ret, frame = cap.read()
+                if not ret:
+                    continue
 
-            cv2.imwrite(capture_path, frame)
+                cv2.imwrite(capture_path, frame)
 
-            if dect.frame_comp(profile):
-                self.status.emit("Dialogue detected!")
-                notif.alert()
+                if dect.frame_comp(profile):
+                    self.status.emit("Dialogue detected!")
+                    notif.alert()
 
-            time.sleep(0.05)
-
-        cap.release()
-        self.status.emit("Stopped")
+                time.sleep(0.05)
+        finally:
+            cap.release()
+            self.running = False
+            app_state.monitoring_active = False
+            self.status.emit("Stopped")
 
     def stop(self):
         self.running = False

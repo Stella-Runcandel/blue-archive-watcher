@@ -4,6 +4,7 @@ from core.profiles import (
     delete_profile,
     list_profiles,
     set_profile_icon,
+    validate_profile_name,
 )
 
 
@@ -22,6 +23,11 @@ class ProfileController:
         """Mutates: active_profile, selected_frame, selected_reference. Does NOT mutate: monitoring_active. Returns: (bool, str)."""
         if app_state.monitoring_active:
             return False, "Stop monitoring before changing profiles."
+        valid, message = validate_profile_name(name)
+        if not valid:
+            return False, message
+        if name not in list_profiles():
+            return False, "Profile not found."
         app_state.active_profile = name
         app_state.selected_frame = None
         app_state.selected_reference = None

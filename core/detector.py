@@ -24,11 +24,13 @@ def refrence_selector(profile_name):
 
     frames_dir = dirs["frames"]
     base_frames = [f for f in os.listdir(frames_dir) if f.lower().endswith(".png")]
-    assert base_frames, "No base frames found for this profile"
+    if not base_frames:
+        return False, "No base frames found for this profile"
 
     base_path = os.path.join(frames_dir, base_frames[0])
     img = cv2.imread(base_path)
-    assert img is not None, "Base frame could not be loaded"
+    if img is None:
+        return False, "Base frame could not be loaded"
 
     orig_h, orig_w = img.shape[:2]
     scale = min(1200 / orig_w, 800 / orig_h, 1.0)
@@ -49,7 +51,7 @@ def refrence_selector(profile_name):
     x, y, w, h = roi
     if w <= 0 or h <= 0:
         cv2.destroyAllWindows()
-        return
+        return False, "Reference selection cancelled"
 
     x0, y0 = int(x / scale), int(y / scale)
     x1, y1 = int((x + w) / scale), int((y + h) / scale)
@@ -61,6 +63,7 @@ def refrence_selector(profile_name):
 
     cv2.imwrite(ref_path, crop)
     cv2.destroyAllWindows()
+    return True, f"Reference saved as {os.path.basename(ref_path)}"
 
 
 def _frames_similar(current_frame, last_frame):
