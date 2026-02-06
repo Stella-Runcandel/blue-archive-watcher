@@ -12,6 +12,15 @@ class PanelHeader(QWidget):
 
         title_lbl = QLabel(title)
 
+        self.setStyleSheet(
+            "background-color: #332f2a; border: 1px solid #595148;"
+            "color: #c8c1b7;"
+        )
+        back_btn.setStyleSheet(
+            "background-color: #3a352f; border: 1px solid #595148; color: #c8c1b7;"
+        )
+        title_lbl.setStyleSheet("color: #c8c1b7; font-weight: bold;")
+
         layout = QHBoxLayout()
         layout.addWidget(back_btn)
         layout.addWidget(title_lbl)

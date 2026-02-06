@@ -22,6 +22,10 @@ class AppShell(QWidget):
         self.stack = QStackedLayout()
         self.nav_bar = NavBar()
 
+        self.setStyleSheet(
+            "QPushButton:hover { background-color: #7a889a; }"
+        )
+
         root_layout.addLayout(self.stack)
         root_layout.addWidget(self.nav_bar)
 

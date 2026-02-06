@@ -54,7 +54,7 @@ class DashboardPanel(QWidget):
         self.profile_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.profile_preview.setMinimumHeight(180)
         self.profile_preview.setStyleSheet(
-            "border: 1px solid #3a3a3a; color: #aaa;"
+            "border: 1px solid #595148; background-color: #332f2a; color: #c8c1b7;"
         )
         self.monitor_label = QLabel("Monitoring: Stopped")
         self.status_label = QLabel("Status: Idle")
