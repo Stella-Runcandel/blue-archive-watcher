@@ -11,7 +11,6 @@ from core.profiles import (
 
 EXIT_TIMEOUT = 0.6             # seconds dialogue must disappear to reset
 
-_capture_counter = 0
 _DEBUG_SIMILARITY_THRESHOLD = 2.0
 
 
@@ -22,7 +21,6 @@ class DetectorState:
     last_seen_time: float = 0.0
     last_debug_frame: object = None
     debug_counter: int = 0
-    last_capture_persist_time: float = 0.0
 
 
 def new_detector_state():
@@ -33,8 +31,6 @@ _default_detector_state = new_detector_state()
 
 # Centralized artifact controls for monitor/debug storage.
 ARTIFACT_POLICY = {
-    "capture_snapshot_interval_s": 5.0,
-    "capture_retention_count": 30,
     "debug_retention_count": 200,
 }
 
@@ -126,32 +122,12 @@ def _enforce_retention(directory, prefix, keep_count):
             os.remove(path)
 
 
-def _save_capture_snapshot(profile_name, frame, state, force=False):
-    global _capture_counter
-
+def _save_capture_snapshot(profile_name, frame):
     dirs = get_profile_dirs(profile_name)
     captures_dir = dirs["captures"]
-    now = time.time()
-    interval = ARTIFACT_POLICY["capture_snapshot_interval_s"]
-
-    if not force and now - state.last_capture_persist_time < interval:
-        return False
-
-    _capture_counter += 1
-    state.last_capture_persist_time = now
 
     latest_path = os.path.join(captures_dir, "latest.png")
-    snapshot_path = os.path.join(captures_dir, f"snapshot_{_capture_counter:06d}.png")
-
     cv2.imwrite(latest_path, frame)
-    cv2.imwrite(snapshot_path, frame)
-
-    _enforce_retention(
-        captures_dir,
-        prefix="snapshot_",
-        keep_count=ARTIFACT_POLICY["capture_retention_count"],
-    )
-    return True
 
 
 def _detect_from_gray(profile_name, frame_gray):
@@ -183,13 +159,13 @@ def _detect_from_gray(profile_name, frame_gray):
     return None, None
 
 
-def frame_comp_from_array(profile_name, frame, state, persist_capture=False):
+def frame_comp_from_array(profile_name, frame, state):
 
     if not profile_name or frame is None:
         return False
 
     profile_valid = os.path.isdir(profile_path(profile_name))
-    _save_capture_snapshot(profile_name, frame, state, force=False)
+    _save_capture_snapshot(profile_name, frame)
 
     frame_gray = (
         cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -208,8 +184,6 @@ def frame_comp_from_array(profile_name, frame, state, persist_capture=False):
             state.active_dialogue = matched_ref
 
         if event_start:
-            _save_capture_snapshot(profile_name, frame, state, force=True)
-
             debug = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
             x, y, w, h = match_bbox
             cv2.rectangle(debug, (x, y), (x + w, y + h), (0, 255, 0), 2)
@@ -267,7 +241,6 @@ def frame_comp(profile_name, state=None):
         profile_name,
         frame,
         state,
-        persist_capture=False,
     )
 
 

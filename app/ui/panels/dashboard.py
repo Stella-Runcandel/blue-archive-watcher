@@ -163,7 +163,6 @@ class DashboardPanel(QWidget):
         self.monitor.status.connect(self.status_label.setText)
         self.monitor_controller = MonitorController(self.monitor)
         self._cached_available_camera_indices = None
-        self._camera_indices_profile = None
 
         self.start_btn.clicked.connect(self.start)
         self.stop_btn.clicked.connect(self.stop)
@@ -282,12 +281,10 @@ class DashboardPanel(QWidget):
         if not profile:
             self.camera_combo.blockSignals(False)
             self.camera_combo.setEnabled(False)
-            self._camera_indices_profile = None
             return
 
-        if self._cached_available_camera_indices is None or self._camera_indices_profile != profile:
+        if self._cached_available_camera_indices is None:
             self._cached_available_camera_indices = self.monitor.list_available_camera_indices()
-            self._camera_indices_profile = profile
 
         current_index = get_profile_camera_index(profile)
         options = list(self._cached_available_camera_indices)

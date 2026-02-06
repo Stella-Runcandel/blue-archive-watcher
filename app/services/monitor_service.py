@@ -78,7 +78,6 @@ class MonitorService(QThread):
                         profile,
                         frame,
                         self.detector_state,
-                        persist_capture=True,
                     ):
                         self.status.emit("Dialogue detected!")
                         notif.alert()
