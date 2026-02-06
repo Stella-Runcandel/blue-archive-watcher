@@ -13,10 +13,13 @@ from core.profiles import (
     get_detection_threshold,
 )
 
-EXIT_TIMEOUT = 0.6             # seconds dialogue must disappear to reset
+EXIT_TIMEOUT = 0.6  # seconds dialogue must disappear to reset
 DEBUG_STORAGE_LIMIT_BYTES = 1_073_741_824  # 1 GB
 
 
+# =========================
+# Detector state
+# =========================
 
 @dataclass
 class DetectorState:
@@ -29,30 +32,9 @@ class DetectorState:
     total_debug_storage_bytes: int = 0
 
 
-def new_detector_state():
-    state = DetectorState()
-    initialize_debug_storage_tracking(state)
-    return state
-
-        for name in names:
-            if not name.lower().endswith(DEBUG_EXTENSIONS):
-                continue
-            path = os.path.join(debug_dir, name)
-            try:
-                if os.path.isfile(path):
-                    total += os.path.getsize(path)
-            except Exception:
-                continue
-    return total
-
-
-def initialize_debug_storage_tracking(state):
-    try:
-        state.total_debug_storage_bytes = _compute_initial_debug_storage_bytes()
-    except Exception:
-        logging.warning("Failed to initialize debug storage accounting.", exc_info=True)
-        state.total_debug_storage_bytes = DEBUG_STORAGE_LIMIT_BYTES
-
+# =========================
+# Debug storage accounting
+# =========================
 
 def _iter_all_debug_dirs_for_initialization():
     if os.path.isdir(BASE_DIR):
@@ -88,15 +70,18 @@ def _compute_initial_debug_storage_bytes():
     return total
 
 
-def initialize_debug_storage_tracking(state):
+def initialize_debug_storage_tracking(state: DetectorState):
     try:
         state.total_debug_storage_bytes = _compute_initial_debug_storage_bytes()
     except Exception:
-        logging.warning("Failed to initialize debug storage accounting.", exc_info=True)
+        logging.warning(
+            "Failed to initialize debug storage accounting; disabling debug writes.",
+            exc_info=True,
+        )
         state.total_debug_storage_bytes = DEBUG_STORAGE_LIMIT_BYTES
 
 
-def _emit_debug_limit_warning_once(state):
+def _emit_debug_limit_warning_once(state: DetectorState):
     if state.debug_limit_warning_emitted:
         return
     logging.warning(
@@ -106,7 +91,7 @@ def _emit_debug_limit_warning_once(state):
     state.debug_limit_warning_emitted = True
 
 
-def _save_debug_image_if_allowed(debug_dir, debug_image, state):
+def _save_debug_image_if_allowed(debug_dir, debug_image, state: DetectorState):
     try:
         if state.total_debug_storage_bytes >= DEBUG_STORAGE_LIMIT_BYTES:
             _emit_debug_limit_warning_once(state)
@@ -117,6 +102,7 @@ def _save_debug_image_if_allowed(debug_dir, debug_image, state):
             debug_dir,
             f"match_{time.time_ns()}_{state.debug_counter:04d}.png"
         )
+
         if not cv2.imwrite(debug_path, debug_image):
             logging.warning("Failed to write debug image; continuing monitoring.")
             return
@@ -124,13 +110,36 @@ def _save_debug_image_if_allowed(debug_dir, debug_image, state):
         try:
             state.total_debug_storage_bytes += os.path.getsize(debug_path)
         except Exception:
-            logging.warning("Failed to read debug image size; continuing monitoring.", exc_info=True)
+            logging.warning(
+                "Failed to read debug image size; continuing monitoring.",
+                exc_info=True,
+            )
 
         state.last_debug_frame = debug_image
+
     except Exception:
-        logging.warning("Failed to write debug image; continuing monitoring.", exc_info=True)
+        logging.warning(
+            "Failed to write debug image; continuing monitoring.",
+            exc_info=True,
+        )
+
+
+# =========================
+# Detector lifecycle
+# =========================
+
+def new_detector_state():
+    state = DetectorState()
+    initialize_debug_storage_tracking(state)
+    return state
+
 
 _default_detector_state = new_detector_state()
+
+
+# =========================
+# Reference selection
+# =========================
 
 def refrence_selector(profile_name):
     dirs = get_profile_dirs(profile_name)
@@ -179,13 +188,9 @@ def refrence_selector(profile_name):
     return True, f"Reference saved as {os.path.basename(ref_path)}"
 
 
-def _save_capture_snapshot(profile_name, frame):
-    dirs = get_profile_dirs(profile_name)
-    captures_dir = dirs["captures"]
-
-    latest_path = os.path.join(captures_dir, "latest.png")
-    cv2.imwrite(latest_path, frame)
-
+# =========================
+# Detection core
+# =========================
 
 def _detect_from_gray(profile_name, frame_gray):
     frame_e = cv2.Canny(frame_gray, 80, 160)
@@ -216,8 +221,7 @@ def _detect_from_gray(profile_name, frame_gray):
     return None, None
 
 
-def frame_comp_from_array(profile_name, frame, state):
-
+def frame_comp_from_array(profile_name, frame, state: DetectorState):
     if not profile_name or frame is None:
         return False
 
@@ -227,19 +231,21 @@ def frame_comp_from_array(profile_name, frame, state):
         cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if frame.ndim == 3 else frame
     )
+
     now = time.time()
     matched_ref, match_bbox = _detect_from_gray(profile_name, frame_gray)
 
     if matched_ref is not None:
         state.last_seen_time = now
         event_start = not state.event_active
+
         if event_start:
             state.event_active = True
 
         if state.active_dialogue != matched_ref:
             state.active_dialogue = matched_ref
 
-        # Save exactly one debug artifact per detection event.
+        # One debug image per detection event
         if event_start:
             debug = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
             x, y, w, h = match_bbox
@@ -254,6 +260,7 @@ def frame_comp_from_array(profile_name, frame, state):
 
         return True
 
+    # Event exit
     if state.active_dialogue and now - state.last_seen_time > EXIT_TIMEOUT:
         state.active_dialogue = None
         state.event_active = False
@@ -282,47 +289,5 @@ def frame_comp(profile_name, state=None):
 
     if state is None:
         state = _default_detector_state
-    return frame_comp_from_array(
-        profile_name,
-        frame,
-        state,
-    )
 
-
-def crop_existing_reference(profile_name, ref_name):
-    from core.profiles import get_profile_dirs
-    import cv2
-    import os
-
-    dirs = get_profile_dirs(profile_name)
-    ref_path = os.path.join(dirs["references"], ref_name)
-
-    img = cv2.imread(ref_path)
-    if img is None:
-        return False
-
-    roi = cv2.selectROI(
-        "Select crop (ENTER to confirm, ESC to cancel)",
-        img,
-        fromCenter=False,
-        showCrosshair=True
-    )
-
-    x, y, w, h = roi
-    if w <= 0 or h <= 0:
-        cv2.destroyAllWindows()
-        return False
-
-    crop = img[y:y+h, x:x+w]
-
-    existing = [
-        f for f in os.listdir(dirs["references"])
-        if f.startswith(ref_name.replace(".png", "_crop"))
-    ]
-
-    crop_name = f"{ref_name.replace('.png', '')}_crop{len(existing)+1}.png"
-    crop_path = os.path.join(dirs["references"], crop_name)
-
-    cv2.imwrite(crop_path, crop)
-    cv2.destroyAllWindows()
-    return True
+    return frame_comp_from_array(profile_name, frame, state)
