@@ -1,37 +1,22 @@
-from PyQt6.QtWidgets import (
-    QWidget,
-    QPushButton,
-    QLabel,
-    QVBoxLayout,
-    QComboBox,
-    QHBoxLayout,
-)
-from PyQt6.QtGui import QPixmap
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from app.app_state import app_state
+from app.controllers.monitor_controller import MonitorController
+from app.services.monitor_service import MonitorService
+from app.ui.theme import Styles
+from app.ui.widget_utils import disable_button_focus_rect, disable_widget_interaction, make_preview_label
 from core import detector as dect
 from core.profiles import (
-    list_profiles,
-    get_profile_icon_bytes,
     get_detection_threshold,
+    get_profile_icon_bytes,
+    list_profiles,
     update_profile_detection_threshold,
 )
 
-from app.app_state import app_state
-from app.services.monitor_service import MonitorService
-from app.controllers.monitor_controller import MonitorController
-
 
 class DashboardPanel(QWidget):
-    """
-    Main dashboard panel.
-    Responsibilities:
-    - Show current profile
-    - Show monitoring state
-    - Start / stop monitoring
-    - Entry point to other panels
-    """
-
     STRICTNESS_OPTIONS = [
         ("Very Loose", 0.55),
         ("Loose", 0.65),
@@ -45,38 +30,89 @@ class DashboardPanel(QWidget):
         super().__init__()
         self.nav = nav
 
-        # ---- status labels ----
         self.profile_label = QLabel("Profile: None")
         self.frame_label = QLabel("Selected Frame: None")
         self.ref_label = QLabel("Selected Reference: None")
-        self.profile_preview_bytes = None
-        self.profile_preview = QLabel("No profile preview")
-        self.profile_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.profile_preview.setMinimumHeight(180)
-        self.profile_preview.setStyleSheet(
-            "border: 1px solid #595148; background-color: #332f2a; color: #c8c1b7;"
-        )
         self.monitor_label = QLabel("Monitoring: Stopped")
         self.status_label = QLabel("Status: Idle")
         self.strictness_label = QLabel("Detection Strictness")
+
+        for label in [
+            self.profile_label,
+            self.frame_label,
+            self.ref_label,
+            self.monitor_label,
+            self.status_label,
+            self.strictness_label,
+        ]:
+            disable_widget_interaction(label)
+            label.setStyleSheet(Styles.info_label())
+
+        self.profile_preview_bytes = None
+        self.profile_preview = make_preview_label("No profile preview", 180, "profile_preview")
+
         self.strictness_combo = QComboBox()
+        self.strictness_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.strictness_combo.setStyleSheet(
+            """
+            QComboBox {
+                background-color: #ffffff;
+                color: #111111;
+                border: 1px solid #d6d6d6;
+                border-radius: 6px;
+                padding: 6px 10px;
+                outline: none;
+            }
+            QComboBox:hover {
+                border-color: #cdcdcd;
+            }
+            QComboBox:focus {
+                border: 2px solid #7f8fa3;
+                outline: none;
+            }
+            QComboBox::drop-down {
+                background-color: #ffffff;
+                border: 0;
+                width: 20px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #111111;
+                width: 0;
+                height: 0;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #ffffff;
+                color: #111111;
+                selection-background-color: #6f7f94;
+                selection-color: #ffffff;
+                border: 1px solid #d6d6d6;
+                outline: none;
+            }
+            """
+        )
         for label, _ in self.STRICTNESS_OPTIONS:
             self.strictness_combo.addItem(label)
 
-        # ---- action buttons ----
         self.start_btn = QPushButton("▶ Start Monitoring")
         self.stop_btn = QPushButton("⏹ Stop")
+        for button in [self.start_btn, self.stop_btn]:
+            button.setStyleSheet(Styles.button())
+            disable_button_focus_rect(button)
 
-        # ---- layout ----
         layout = QVBoxLayout()
         profile_row = QHBoxLayout()
         profile_row.addWidget(self.profile_label)
         profile_row.addStretch(1)
         layout.addLayout(profile_row)
+
         strictness_row = QHBoxLayout()
         strictness_row.addWidget(self.strictness_label)
         strictness_row.addWidget(self.strictness_combo)
         layout.addLayout(strictness_row)
+
         layout.addWidget(self.frame_label)
         layout.addWidget(self.ref_label)
         layout.addWidget(self.profile_preview)
@@ -86,106 +122,72 @@ class DashboardPanel(QWidget):
         layout.addWidget(self.stop_btn)
         self.setLayout(layout)
 
-        # ---- services ----
         self.monitor = MonitorService()
         self.monitor.status.connect(self.status_label.setText)
-
-        # ---- controllers ----
         self.monitor_controller = MonitorController(self.monitor)
 
-        # ---- signals ----
         self.start_btn.clicked.connect(self.start)
         self.stop_btn.clicked.connect(self.stop)
-        self.strictness_combo.currentIndexChanged.connect(
-            self.on_strictness_changed
-        )
+        self.strictness_combo.currentIndexChanged.connect(self.on_strictness_changed)
 
-        # initial state
         self.refresh()
-
 
     def select_profile(self):
         profiles = list_profiles()
         if not profiles:
-            self.label.setText("No profiles found")
+            self.status_label.setText("No profiles found")
             return
 
         app_state.active_profile = profiles[0]
         self.profile_label.setText(f"Profile: {profiles[0]}")
-        self.label.setText("Profile selected")
+        self.status_label.setText("Profile selected")
 
     def select_reference(self):
         if not app_state.active_profile:
-            self.label.setText("Select a profile first")
+            self.status_label.setText("Select a profile first")
             return
 
-        self.label.setText("Select reference region…")
+        self.status_label.setText("Select reference region…")
         _, message = dect.refrence_selector(app_state.active_profile)
-        self.label.setText(message)
+        self.status_label.setText(message)
 
     def start(self):
         if app_state.monitoring_active:
             self.status_label.setText("Monitoring already running")
             return
-
         if not app_state.active_profile:
             self.status_label.setText("Select a profile first")
             return
-
         if not app_state.selected_reference:
             self.status_label.setText("Select a reference first")
             return
 
         self.monitor_controller.start()
-        self.status_label.setText(
-            f"Monitoring started ({app_state.selected_reference})"
-        )
-
+        self.status_label.setText(f"Monitoring started ({app_state.selected_reference})")
         self.refresh()
 
     def stop(self):
         if not app_state.monitoring_active:
             self.status_label.setText("Monitoring is not running")
             return
-
         self.monitor_controller.stop()
         self.status_label.setText("Monitoring stopped")
         self.refresh()
-
 
     def close(self):
         self.monitor_controller.stop()
 
     def refresh(self):
-        self.profile_label.setText(
-            f"Profile: {app_state.active_profile or 'None'}"
-        )
-
-        self.frame_label.setText(
-            f"Selected Frame: {app_state.selected_frame or 'None'}"
-        )
-
-        self.ref_label.setText(
-            f"Selected Reference: {app_state.selected_reference or 'None'}"
-        )
-
-        if self.monitor.isRunning():
-            self.monitor_label.setText("Monitoring: Running")
-        else:
-            self.monitor_label.setText("Monitoring: Stopped")
+        self.profile_label.setText(f"Profile: {app_state.active_profile or 'None'}")
+        self.frame_label.setText(f"Selected Frame: {app_state.selected_frame or 'None'}")
+        self.ref_label.setText(f"Selected Reference: {app_state.selected_reference or 'None'}")
 
         if app_state.monitoring_active:
-            self.monitor_label.setText(
-                f"Monitoring: Running ({app_state.selected_reference})"
-            )
+            self.monitor_label.setText(f"Monitoring: Running ({app_state.selected_reference})")
         else:
             self.monitor_label.setText("Monitoring: Stopped")
 
-        # Start is guarded, Stop is NOT
-        self.start_btn.setEnabled(
-            app_state.selected_reference is not None
-            and not self.monitor.isRunning()
-        )
+        self.start_btn.setEnabled(app_state.selected_reference is not None and not self.monitor.isRunning())
         self.update_detection_strictness()
         self.update_profile_preview()
 
@@ -203,10 +205,7 @@ class DashboardPanel(QWidget):
             target = float(threshold)
         except (TypeError, ValueError):
             target = get_detection_threshold(None)
-        distances = [
-            abs(target - value)
-            for _, value in self.STRICTNESS_OPTIONS
-        ]
+        distances = [abs(target - value) for _, value in self.STRICTNESS_OPTIONS]
         return distances.index(min(distances))
 
     def on_strictness_changed(self, index):
@@ -233,12 +232,13 @@ class DashboardPanel(QWidget):
         self.profile_preview_bytes = data
         pixmap = QPixmap()
         pixmap.loadFromData(data)
-        scaled = pixmap.scaled(
-            self.profile_preview.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
+        self.profile_preview.setPixmap(
+            pixmap.scaled(
+                self.profile_preview.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
         )
-        self.profile_preview.setPixmap(scaled)
         self.profile_preview.setText("")
 
     def resizeEvent(self, event):
@@ -247,9 +247,10 @@ class DashboardPanel(QWidget):
             return
         pixmap = QPixmap()
         pixmap.loadFromData(self.profile_preview_bytes)
-        scaled = pixmap.scaled(
-            self.profile_preview.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
+        self.profile_preview.setPixmap(
+            pixmap.scaled(
+                self.profile_preview.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
         )
-        self.profile_preview.setPixmap(scaled)

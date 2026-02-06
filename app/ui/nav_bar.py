@@ -1,4 +1,8 @@
-from PyQt6.QtWidgets import QWidget, QPushButton, QVBoxLayout
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+
+from app.ui.theme import Colors, Styles
+from app.ui.widget_utils import disable_button_focus_rect
 
 
 class NavBar(QWidget):
@@ -16,19 +20,21 @@ class NavBar(QWidget):
         layout.addWidget(self.refs_btn)
         layout.addWidget(self.debug_btn)
         layout.addStretch()
-
         self.setLayout(layout)
         self.setFixedWidth(140)
 
         self.setStyleSheet(
-            "background-color: #332f2a; border-left: 1px solid #595148;"
-            "color: #c8c1b7;"
+            f"background-color: {Colors.BG_DARK}; border-left: 1px solid {Colors.BORDER_DARK};"
+            f"color: {Colors.FG_LIGHT};"
         )
-        btn_style = (
-            "QPushButton { background-color: #3a352f; border: 1px solid #595148; color: #c8c1b7; }"
-            "QPushButton:hover { background-color: #7a889a; }"
-        )
-        self.profile_btn.setStyleSheet(btn_style)
-        self.frames_btn.setStyleSheet(btn_style)
-        self.refs_btn.setStyleSheet(btn_style)
-        self.debug_btn.setStyleSheet(btn_style)
+
+        btn_style = Styles.button(dark=True)
+        for button in [
+            self.profile_btn,
+            self.frames_btn,
+            self.refs_btn,
+            self.debug_btn,
+        ]:
+            button.setStyleSheet(btn_style)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            disable_button_focus_rect(button)

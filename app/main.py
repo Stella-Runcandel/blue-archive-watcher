@@ -15,8 +15,14 @@ QWidget {
 }
 
 QLabel {
-    background-color: #ffffff;
+    background-color: transparent;
     color: #111111;
+    selection-background-color: transparent;
+    selection-color: #111111;
+}
+
+QLabel:focus {
+    outline: none;
 }
 
 QPushButton {
@@ -25,6 +31,7 @@ QPushButton {
     border: 1px solid #d6d6d6;
     border-radius: 8px;
     padding: 6px 10px;
+    outline: none;
 }
 
 QPushButton:hover {
@@ -35,6 +42,17 @@ QPushButton:hover {
 QPushButton:pressed {
     background-color: #eeeeee;
     border-color: #c6c6c6;
+}
+
+QPushButton:focus {
+    outline: none;
+    border: 1px solid #d6d6d6;
+}
+
+QLabel[objectName="preview_label"],
+QLabel[objectName="profile_preview"] {
+    background-color: transparent;
+    selection-background-color: transparent;
 }
 
 QLineEdit,
@@ -55,105 +73,14 @@ QTimeEdit {
     selection-color: #111111;
 }
 
-QComboBox::drop-down,
-QDateEdit::drop-down,
-QDateTimeEdit::drop-down,
-QTimeEdit::drop-down {
+QScrollArea {
     background-color: #ffffff;
-    border: 0;
-}
-
-QScrollArea,
-QFrame,
-QListWidget,
-QTreeWidget,
-QTableWidget,
-QListView,
-QTreeView,
-QTableView,
-QGraphicsView,
-QStackedWidget,
-QToolBox,
-QSplitter,
-QScrollBar,
-QGroupBox,
-QTabWidget::pane,
-QTabBar::tab,
-QStatusBar,
-QMenuBar,
-QMenu,
-QDialog,
-QMainWindow,
-QDockWidget,
-QToolBar {
-    background-color: #ffffff;
-    color: #111111;
     border: 1px solid #d6d6d6;
     border-radius: 8px;
 }
 
-QTabBar::tab:selected,
-QTabBar::tab:hover,
-QMenu::item:selected {
-    background-color: #f3f3f3;
-    color: #111111;
-}
-
-QHeaderView::section {
-    background-color: #ffffff;
-    color: #111111;
-    border: 1px solid #d6d6d6;
-    padding: 4px;
-}
-
-QScrollBar:vertical,
-QScrollBar:horizontal {
-    background-color: #ffffff;
-    border: 1px solid #d6d6d6;
-    margin: 0;
-}
-
-QScrollBar::handle:vertical,
-QScrollBar::handle:horizontal {
-    background-color: #efefef;
-    border: 1px solid #d6d6d6;
-    border-radius: 5px;
-}
-
-QScrollBar::handle:vertical:hover,
-QScrollBar::handle:horizontal:hover {
-    background-color: #e7e7e7;
-}
-
-QScrollBar::add-line,
-QScrollBar::sub-line,
-QScrollBar::add-page,
-QScrollBar::sub-page {
-    background-color: #ffffff;
-    border: none;
-}
-
-QCheckBox,
-QRadioButton {
-    background-color: #ffffff;
-    color: #111111;
-}
-
-QCheckBox::indicator,
-QRadioButton::indicator {
-    background-color: #ffffff;
-    border: 1px solid #d6d6d6;
-}
-
-QCheckBox::indicator:checked,
-QRadioButton::indicator:checked {
-    background-color: #f0f0f0;
-}
-
-QToolTip {
-    background-color: #ffffff;
-    color: #111111;
-    border: 1px solid #d6d6d6;
+QScrollArea > QWidget > QWidget {
+    background-color: transparent;
 }
 """
 
