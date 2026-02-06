@@ -23,3 +23,12 @@ It is:
 
 FrameTrace is not game-specific, not cloud-based, and not AI hype.
 It’s a local, power-user tool for people who want control.
+## Detection + artifact persistence
+
+- Monitoring now runs detection directly against in-memory camera frames (`frame_comp_from_array`) to avoid per-cycle disk round-trips.
+- File-based detection (`frame_comp`) remains available for manual/debug workflows that intentionally operate on `captures/latest.png`.
+- Capture persistence is optional and throttled via `core/detector.py::ARTIFACT_POLICY`.
+  - `capture_snapshot_interval_s`: minimum interval for periodic snapshots.
+  - `capture_retention_count`: max number of `captures/snapshot_*.png` files retained.
+  - `debug_retention_count`: max number of `debug/match_*.png` files retained.
+- A forced capture snapshot is also recorded when a new detection event starts, then retention is enforced.

@@ -1,6 +1,7 @@
 import cv2
 import os
 import time
+from dataclasses import dataclass
 from core.profiles import (
     get_profile_dirs,
     get_debug_dir,
@@ -8,15 +9,34 @@ from core.profiles import (
     get_detection_threshold,
 )
 
-# ---- dialogue state ----
-_active_dialogue = None        # name of reference currently active
-_last_seen_time = 0.0          # last time dialogue was visible
 EXIT_TIMEOUT = 0.6             # seconds dialogue must disappear to reset
 
-_debug_counter = 0  # MEDIUM 1: filename-only counter; not used for logic/throttling/safety.
-_event_active = False
-_last_debug_frame = None
-_DEBUG_SIMILARITY_THRESHOLD = 2.0  # CRITICAL 3: provisional threshold; will be tuned later.
+_capture_counter = 0
+_DEBUG_SIMILARITY_THRESHOLD = 2.0
+
+
+@dataclass
+class DetectorState:
+    active_dialogue: str | None = None
+    event_active: bool = False
+    last_seen_time: float = 0.0
+    last_debug_frame: object = None
+    debug_counter: int = 0
+    last_capture_persist_time: float = 0.0
+
+
+def new_detector_state():
+    return DetectorState()
+
+
+_default_detector_state = new_detector_state()
+
+# Centralized artifact controls for monitor/debug storage.
+ARTIFACT_POLICY = {
+    "capture_snapshot_interval_s": 5.0,
+    "capture_retention_count": 30,
+    "debug_retention_count": 200,
+}
 
 
 def refrence_selector(profile_name):
@@ -87,34 +107,59 @@ def _frames_similar(current_frame, last_frame):
     return diff.mean() <= _DEBUG_SIMILARITY_THRESHOLD
 
 
-def frame_comp(profile_name):
-    global _active_dialogue, _last_seen_time, _debug_counter
-    global _event_active, _last_debug_frame
+def _enforce_retention(directory, prefix, keep_count):
+    if keep_count <= 0 or not os.path.isdir(directory):
+        return
+    files = [
+        f for f in os.listdir(directory)
+        if f.startswith(prefix) and f.lower().endswith(".png")
+    ]
+    if len(files) <= keep_count:
+        return
+    files.sort()
+    base = os.path.realpath(directory)
+    for name in files[:-keep_count]:
+        path = os.path.realpath(os.path.join(directory, name))
+        if not path.startswith(base + os.path.sep):
+            continue
+        if os.path.isfile(path):
+            os.remove(path)
 
-    if not profile_name:
-        return False
 
-    # CRITICAL 1: profile validity only affects debug save location, not detection flow.
-    profile_valid = os.path.isdir(profile_path(profile_name))
+def _save_capture_snapshot(profile_name, frame, state, force=False):
+    global _capture_counter
 
     dirs = get_profile_dirs(profile_name)
-    frame_path = os.path.join(dirs["captures"], "latest.png")
-
-    if not os.path.exists(frame_path):
-        return False
-
-    frame = cv2.imread(frame_path, cv2.IMREAD_GRAYSCALE)
-    if frame is None:
-        return False
-
-    frame_e = cv2.Canny(frame, 80, 160)
+    captures_dir = dirs["captures"]
     now = time.time()
+    interval = ARTIFACT_POLICY["capture_snapshot_interval_s"]
 
-    matched_ref = None
-    match_bbox = None
+    if not force and now - state.last_capture_persist_time < interval:
+        return False
 
-    for ref in os.listdir(dirs["references"]):
-        ref_path = os.path.join(dirs["references"], ref)
+    _capture_counter += 1
+    state.last_capture_persist_time = now
+
+    latest_path = os.path.join(captures_dir, "latest.png")
+    snapshot_path = os.path.join(captures_dir, f"snapshot_{_capture_counter:06d}.png")
+
+    cv2.imwrite(latest_path, frame)
+    cv2.imwrite(snapshot_path, frame)
+
+    _enforce_retention(
+        captures_dir,
+        prefix="snapshot_",
+        keep_count=ARTIFACT_POLICY["capture_retention_count"],
+    )
+    return True
+
+
+def _detect_from_gray(profile_name, frame_gray):
+    frame_e = cv2.Canny(frame_gray, 80, 160)
+    references_dir = get_profile_dirs(profile_name)["references"]
+
+    for ref in os.listdir(references_dir):
+        ref_path = os.path.join(references_dir, ref)
         template = cv2.imread(ref_path, cv2.IMREAD_GRAYSCALE)
         if template is None:
             continue
@@ -129,34 +174,49 @@ def frame_comp(profile_name):
         x, y = max_loc
         h, w = template_e.shape[:2]
 
-        # stabilize position to kill jitter
         GRID = 8
         x = (x // GRID) * GRID
         y = (y // GRID) * GRID
 
-        matched_ref = ref
-        match_bbox = (x, y, w, h)
-        break  # first valid match is enough
+        return ref, (x, y, w, h)
 
-    # -------- STATE LOGIC --------
+    return None, None
+
+
+def frame_comp_from_array(profile_name, frame, state, persist_capture=False):
+
+    if not profile_name or frame is None:
+        return False
+
+    profile_valid = os.path.isdir(profile_path(profile_name))
+    if persist_capture:
+        _save_capture_snapshot(profile_name, frame, state)
+
+    frame_gray = (
+        cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if frame.ndim == 3 else frame
+    )
+    now = time.time()
+    matched_ref, match_bbox = _detect_from_gray(profile_name, frame_gray)
 
     if matched_ref is not None:
-        _last_seen_time = now
-
-        event_start = not _event_active
+        state.last_seen_time = now
+        event_start = not state.event_active
         if event_start:
-            _event_active = True
+            state.event_active = True
 
-        if _active_dialogue != matched_ref:
-            _active_dialogue = matched_ref
+        if state.active_dialogue != matched_ref:
+            state.active_dialogue = matched_ref
 
         if event_start:
-            debug = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            _save_capture_snapshot(profile_name, frame, state, force=True)
+
+            debug = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
             x, y, w, h = match_bbox
             cv2.rectangle(debug, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-            if not _frames_similar(debug, _last_debug_frame):
-                _debug_counter += 1
+            if not _frames_similar(debug, state.last_debug_frame):
+                state.debug_counter += 1
                 debug_dir, _ = get_debug_dir(
                     profile_name if profile_valid else None,
                     allow_fallback=True
@@ -164,20 +224,52 @@ def frame_comp(profile_name):
                 if debug_dir:
                     debug_path = os.path.join(
                         debug_dir,
-                        f"match_{_debug_counter:04d}.png"
+                        f"match_{state.debug_counter:04d}.png"
                     )
                     cv2.imwrite(debug_path, debug)
-                    _last_debug_frame = debug
+                    state.last_debug_frame = debug
+                    _enforce_retention(
+                        debug_dir,
+                        prefix="match_",
+                        keep_count=ARTIFACT_POLICY["debug_retention_count"],
+                    )
 
         return True
 
-    # no match this frame → check for exit
-    if _active_dialogue and now - _last_seen_time > EXIT_TIMEOUT:
-        _active_dialogue = None
-        _event_active = False
-        _last_debug_frame = None  # CRITICAL 2: reset similarity guard on event end.
+    if state.active_dialogue and now - state.last_seen_time > EXIT_TIMEOUT:
+        state.active_dialogue = None
+        state.event_active = False
+        state.last_debug_frame = None
 
     return False
+
+
+def frame_comp(profile_name, state=None):
+    """
+    File-based detector entrypoint kept for manual/debug workflows.
+    Runtime monitoring should use frame_comp_from_array.
+    """
+    if not profile_name:
+        return False
+
+    dirs = get_profile_dirs(profile_name)
+    frame_path = os.path.join(dirs["captures"], "latest.png")
+
+    if not os.path.exists(frame_path):
+        return False
+
+    frame = cv2.imread(frame_path)
+    if frame is None:
+        return False
+
+    if state is None:
+        state = _default_detector_state
+    return frame_comp_from_array(
+        profile_name,
+        frame,
+        state,
+        persist_capture=False,
+    )
 
 
 def crop_existing_reference(profile_name, ref_name):

@@ -196,6 +196,59 @@ def update_profile_detection_threshold(profile_name, threshold):
     return True
 
 
+
+
+def has_profile_camera_index(profile_name):
+    if not profile_name:
+        return False
+    dirs = get_profile_dirs(profile_name)
+    meta_path = dirs["meta"]
+    if not os.path.exists(meta_path):
+        return False
+    try:
+        with open(meta_path, "r") as f:
+            data = json.load(f) or {}
+        return "camera_index" in data
+    except Exception:
+        return False
+
+
+def get_profile_camera_index(profile_name):
+    camera_index = 2
+    if not profile_name:
+        return camera_index
+    dirs = get_profile_dirs(profile_name)
+    meta_path = dirs["meta"]
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r") as f:
+                data = json.load(f) or {}
+            camera_index = int(data.get("camera_index", camera_index))
+        except Exception:
+            camera_index = 2
+    return camera_index
+
+
+def set_profile_camera_index(profile_name, camera_index):
+    if not profile_name:
+        return False
+    dirs = get_profile_dirs(profile_name)
+    meta_path = dirs["meta"]
+    data = {"name": profile_name}
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r") as f:
+                data.update(json.load(f) or {})
+        except Exception:
+            pass
+    try:
+        data["camera_index"] = int(camera_index)
+    except (TypeError, ValueError):
+        return False
+    with open(meta_path, "w") as f:
+        json.dump(data, f, indent=2)
+    return True
+
 def list_frames(profile_name):
     dirs = get_profile_dirs(profile_name)
     frames_dir = dirs["frames"]
