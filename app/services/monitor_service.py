@@ -24,18 +24,19 @@ class MonitorService(QThread):
         self.detector_state = dect.new_detector_state()
 
     def _list_available_camera_indices(self, max_devices=10):
+        # Probing indices may briefly activate physical cameras as OpenCV opens each device.
         available = []
         for index in range(max_devices):
-            cap = cv2.VideoCapture(
-                'video=OBS Virtual Camera',
-                cv2.CAP_FFMPEG
-            )
+            cap = cv2.VideoCapture(index)
             try:
                 if cap.isOpened():
                     available.append(index)
             finally:
                 cap.release()
         return available
+
+    def list_available_camera_indices(self, max_devices=10):
+        return self._list_available_camera_indices(max_devices=max_devices)
 
     def run(self):
         profile = app_state.active_profile
@@ -49,21 +50,23 @@ class MonitorService(QThread):
         self.detector_state = dect.new_detector_state()
 
         get_profile_dirs(profile)
+        camera_index = get_profile_camera_index(profile)
+        if not has_profile_camera_index(profile):
+            available = self._list_available_camera_indices()
+            if available:
+                camera_index = available[0]
+                set_profile_camera_index(profile, camera_index)
 
         cap = None
         try:
-            cap = cv2.VideoCapture(
-                "video=OBS Virtual Camera",
-                cv2.CAP_FFMPEG,
-            )
+            cap = cv2.VideoCapture(camera_index)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
             if not cap.isOpened():
-                self.status.emit("Camera failed")
+                self.status.emit(f"Camera failed ({camera_index}). Select another camera index.")
                 return
-
-            logging.info("Using OBS Virtual Camera via FFmpeg backend")
+            logging.info("Using camera index %s", camera_index)
 
             while self.running:
                 ret, frame = cap.read()

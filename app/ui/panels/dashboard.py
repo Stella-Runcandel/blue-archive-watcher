@@ -10,8 +10,10 @@ from app.ui.widget_utils import disable_button_focus_rect, disable_widget_intera
 from core import detector as dect
 from core.profiles import (
     get_detection_threshold,
+    get_profile_camera_index,
     get_profile_icon_bytes,
     list_profiles,
+    set_profile_camera_index,
     update_profile_detection_threshold,
 )
 
@@ -36,6 +38,7 @@ class DashboardPanel(QWidget):
         self.monitor_label = QLabel("Monitoring: Stopped")
         self.status_label = QLabel("Status: Idle")
         self.strictness_label = QLabel("Detection Strictness")
+        self.camera_label = QLabel("Camera Index")
 
         for label in [
             self.profile_label,
@@ -44,6 +47,7 @@ class DashboardPanel(QWidget):
             self.monitor_label,
             self.status_label,
             self.strictness_label,
+            self.camera_label,
         ]:
             disable_widget_interaction(label)
             label.setStyleSheet(Styles.info_label())
@@ -96,6 +100,10 @@ class DashboardPanel(QWidget):
         for label, _ in self.STRICTNESS_OPTIONS:
             self.strictness_combo.addItem(label)
 
+        self.camera_combo = QComboBox()
+        self.camera_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.camera_combo.setStyleSheet(self.strictness_combo.styleSheet())
+
         self.start_btn = QPushButton("▶ Start Monitoring")
         self.stop_btn = QPushButton("⏹ Stop")
         for button in [self.start_btn, self.stop_btn]:
@@ -113,6 +121,11 @@ class DashboardPanel(QWidget):
         strictness_row.addWidget(self.strictness_combo)
         layout.addLayout(strictness_row)
 
+        camera_row = QHBoxLayout()
+        camera_row.addWidget(self.camera_label)
+        camera_row.addWidget(self.camera_combo)
+        layout.addLayout(camera_row)
+
         layout.addWidget(self.frame_label)
         layout.addWidget(self.ref_label)
         layout.addWidget(self.profile_preview)
@@ -125,10 +138,13 @@ class DashboardPanel(QWidget):
         self.monitor = MonitorService()
         self.monitor.status.connect(self.status_label.setText)
         self.monitor_controller = MonitorController(self.monitor)
+        self._cached_available_camera_indices = None
+        self._camera_indices_profile = None
 
         self.start_btn.clicked.connect(self.start)
         self.stop_btn.clicked.connect(self.stop)
         self.strictness_combo.currentIndexChanged.connect(self.on_strictness_changed)
+        self.camera_combo.currentIndexChanged.connect(self.on_camera_changed)
 
         self.refresh()
 
@@ -189,6 +205,7 @@ class DashboardPanel(QWidget):
 
         self.start_btn.setEnabled(app_state.selected_reference is not None and not self.monitor.isRunning())
         self.update_detection_strictness()
+        self.update_camera_indices()
         self.update_profile_preview()
 
     def update_detection_strictness(self):
@@ -216,6 +233,45 @@ class DashboardPanel(QWidget):
             return
         _, threshold = self.STRICTNESS_OPTIONS[index]
         update_profile_detection_threshold(profile, threshold)
+
+
+    def update_camera_indices(self):
+        profile = app_state.active_profile
+        self.camera_combo.blockSignals(True)
+        self.camera_combo.clear()
+
+        if not profile:
+            self.camera_combo.blockSignals(False)
+            self.camera_combo.setEnabled(False)
+            self._camera_indices_profile = None
+            return
+
+        if self._cached_available_camera_indices is None or self._camera_indices_profile != profile:
+            self._cached_available_camera_indices = self.monitor.list_available_camera_indices()
+            self._camera_indices_profile = profile
+
+        current_index = get_profile_camera_index(profile)
+        options = list(self._cached_available_camera_indices)
+        if current_index not in options:
+            options.append(current_index)
+        for idx in sorted(set(options)):
+            self.camera_combo.addItem(str(idx), idx)
+        selected = self.camera_combo.findData(current_index)
+        if selected >= 0:
+            self.camera_combo.setCurrentIndex(selected)
+        self.camera_combo.blockSignals(False)
+        self.camera_combo.setEnabled(self.camera_combo.count() > 0)
+
+    def on_camera_changed(self, index):
+        if index < 0:
+            return
+        profile = app_state.active_profile
+        if not profile:
+            return
+        camera_index = self.camera_combo.itemData(index)
+        if camera_index is None:
+            return
+        set_profile_camera_index(profile, camera_index)
 
     def update_profile_preview(self):
         if not app_state.active_profile:
