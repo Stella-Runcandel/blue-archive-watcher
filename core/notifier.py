@@ -1,6 +1,8 @@
+import logging
+import time
+
 from plyer import notification
 import winsound
-import time
 
 _last_alert = 0
 
@@ -14,12 +16,18 @@ def alert(cooldown=5):
     _last_alert = now
 
     # 🔔 Windows notification
-    notification.notify(
-        title="Frame Trace",
-        message="Dialogue option detected!",
-        app_name="Frame Trace",
-        timeout=3
-    )
+    try:
+        notification.notify(
+            title="Frame Trace",
+            message="Dialogue option detected!",
+            app_name="Frame Trace",
+            timeout=3
+        )
+    except Exception:
+        logging.error("Notification backend failure", exc_info=True)
 
     # 🔊 Sound alert
-    winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+    try:
+        winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+    except Exception:
+        logging.error("Sound backend failure", exc_info=True)

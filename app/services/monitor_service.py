@@ -80,7 +80,10 @@ class MonitorService(QThread):
                         self.detector_state,
                     ):
                         self.status.emit("Dialogue detected!")
-                        notif.alert()
+                        try:
+                            notif.alert()
+                        except Exception:
+                            logging.error("Alert backend failure", exc_info=True)
                 except Exception:
                     logging.error("Detection crash", exc_info=True)
                     continue

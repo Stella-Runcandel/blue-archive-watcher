@@ -1,9 +1,12 @@
 import cv2
 import os
-import re
 import time
+import logging
 from dataclasses import dataclass
 from core.profiles import (
+    BASE_DIR,
+    DEBUG_EXTENSIONS,
+    DEBUG_FALLBACK_DIR,
     get_profile_dirs,
     get_debug_dir,
     profile_path,
@@ -11,6 +14,7 @@ from core.profiles import (
 )
 
 EXIT_TIMEOUT = 0.6             # seconds dialogue must disappear to reset
+DEBUG_STORAGE_LIMIT_BYTES = 1_073_741_824  # 1 GB
 
 
 
@@ -21,36 +25,95 @@ class DetectorState:
     last_seen_time: float = 0.0
     last_debug_frame: object = None
     debug_counter: int = 0
-    debug_counter_initialized: bool = False
+    debug_limit_warning_emitted: bool = False
+    total_debug_storage_bytes: int = 0
 
 
 def new_detector_state():
-    return DetectorState()
+    state = DetectorState()
+    initialize_debug_storage_tracking(state)
+    return state
+
+
+def _iter_all_debug_dirs_for_initialization():
+    if os.path.isdir(BASE_DIR):
+        for profile_name in os.listdir(BASE_DIR):
+            profile_dir = profile_path(profile_name)
+            if not os.path.isdir(profile_dir):
+                continue
+            debug_dir = os.path.join(profile_dir, "debug")
+            if os.path.isdir(debug_dir):
+                yield debug_dir
+
+    if os.path.isdir(DEBUG_FALLBACK_DIR):
+        yield DEBUG_FALLBACK_DIR
+
+
+def _compute_initial_debug_storage_bytes():
+    total = 0
+    for debug_dir in _iter_all_debug_dirs_for_initialization():
+        try:
+            names = os.listdir(debug_dir)
+        except Exception:
+            continue
+
+        for name in names:
+            if not name.lower().endswith(DEBUG_EXTENSIONS):
+                continue
+            path = os.path.join(debug_dir, name)
+            try:
+                if os.path.isfile(path):
+                    total += os.path.getsize(path)
+            except Exception:
+                continue
+    return total
+
+
+def initialize_debug_storage_tracking(state):
+    try:
+        state.total_debug_storage_bytes = _compute_initial_debug_storage_bytes()
+    except Exception:
+        logging.warning("Failed to initialize debug storage accounting.", exc_info=True)
+        state.total_debug_storage_bytes = DEBUG_STORAGE_LIMIT_BYTES
+
+
+def _emit_debug_limit_warning_once(state):
+    if state.debug_limit_warning_emitted:
+        return
+    logging.warning(
+        "Debug storage limit reached (1 GB). "
+        "Debug images are paused. Monitoring continues normally."
+    )
+    state.debug_limit_warning_emitted = True
+
+
+def _save_debug_image_if_allowed(debug_dir, debug_image, state):
+    try:
+        if state.total_debug_storage_bytes >= DEBUG_STORAGE_LIMIT_BYTES:
+            _emit_debug_limit_warning_once(state)
+            return
+
+        state.debug_counter += 1
+        debug_path = os.path.join(
+            debug_dir,
+            f"match_{time.time_ns()}_{state.debug_counter:04d}.png"
+        )
+        if not cv2.imwrite(debug_path, debug_image):
+            logging.warning("Failed to write debug image; continuing monitoring.")
+            return
+
+        try:
+            state.total_debug_storage_bytes += os.path.getsize(debug_path)
+        except Exception:
+            logging.warning("Failed to read debug image size; continuing monitoring.", exc_info=True)
+
+        state.last_debug_frame = debug_image
+    except Exception:
+        logging.warning("Failed to write debug image; continuing monitoring.", exc_info=True)
+
 
 
 _default_detector_state = new_detector_state()
-
-# Centralized artifact controls for monitor/debug storage.
-ARTIFACT_POLICY = {
-    "debug_retention_count": 200,
-}
-
-
-_DEBUG_FILE_PATTERN = re.compile(r"^match_(\d{4})\.png$")
-
-
-def _get_highest_debug_counter(directory):
-    if not directory or not os.path.isdir(directory):
-        return 0
-
-    highest = 0
-    for name in os.listdir(directory):
-        match = _DEBUG_FILE_PATTERN.match(name)
-        if not match:
-            continue
-        highest = max(highest, int(match.group(1)))
-    return highest
-
 
 def refrence_selector(profile_name):
     dirs = get_profile_dirs(profile_name)
@@ -97,25 +160,6 @@ def refrence_selector(profile_name):
     cv2.imwrite(ref_path, crop)
     cv2.destroyAllWindows()
     return True, f"Reference saved as {os.path.basename(ref_path)}"
-
-
-def _enforce_retention(directory, prefix, keep_count):
-    if keep_count <= 0 or not os.path.isdir(directory):
-        return
-    files = [
-        f for f in os.listdir(directory)
-        if f.startswith(prefix) and f.lower().endswith(".png")
-    ]
-    if len(files) <= keep_count:
-        return
-    files.sort()
-    base = os.path.realpath(directory)
-    for name in files[:-keep_count]:
-        path = os.path.realpath(os.path.join(directory, name))
-        if not path.startswith(base + os.path.sep):
-            continue
-        if os.path.isfile(path):
-            os.remove(path)
 
 
 def _save_capture_snapshot(profile_name, frame):
@@ -189,22 +233,7 @@ def frame_comp_from_array(profile_name, frame, state):
                 allow_fallback=True
             )
             if debug_dir:
-                if not state.debug_counter_initialized:
-                    state.debug_counter = _get_highest_debug_counter(debug_dir)
-                    state.debug_counter_initialized = True
-
-                state.debug_counter += 1
-                debug_path = os.path.join(
-                    debug_dir,
-                    f"match_{state.debug_counter:04d}.png"
-                )
-                cv2.imwrite(debug_path, debug)
-                state.last_debug_frame = debug
-                _enforce_retention(
-                    debug_dir,
-                    prefix="match_",
-                    keep_count=ARTIFACT_POLICY["debug_retention_count"],
-                )
+                _save_debug_image_if_allowed(debug_dir, debug, state)
 
         return True
 
