@@ -43,7 +43,7 @@ class ReferencesPanel(QWidget):
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setMinimumHeight(220)
         self.preview_label.setStyleSheet(
-            "border: 1px solid #3a3a3a; color: #aaa;"
+            "border: 1px solid #595148; background-color: #332f2a; color: #c8c1b7;"
         )
 
         self.body_layout = QVBoxLayout()
@@ -125,7 +125,7 @@ class ReferencesPanel(QWidget):
             if app_state.selected_reference == ref:
                 self.selected_btn = select_btn
                 self.selected_btn.setStyleSheet(
-                    "font-weight: bold; background-color: #2d6cdf; color: white;"
+                    "font-weight: bold; background-color: #6f7f94; color: #ece4d9; border: 1px solid #7f8fa3;"
                 )
 
         if app_state.selected_reference:
@@ -156,7 +156,7 @@ class ReferencesPanel(QWidget):
 
         self.selected_btn = self.sender()
         self.selected_btn.setStyleSheet(
-            "font-weight: bold; background-color: #2d6cdf; color: white;"
+            "font-weight: bold; background-color: #6f7f94; color: #ece4d9; border: 1px solid #7f8fa3;"
         )
 
 

@@ -29,13 +29,13 @@ class DebugPanel(QWidget):
 
         self.mode_label = QLabel()
         self.mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.mode_label.setStyleSheet("color: #aaa;")
+        self.mode_label.setStyleSheet("color: #b9b0a4;")
 
         self.preview_label = QLabel("No debug preview")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setMinimumHeight(220)
         self.preview_label.setStyleSheet(
-            "border: 1px solid #3a3a3a; color: #aaa;"
+            "border: 1px solid #595148; background-color: #332f2a; color: #c8c1b7;"
         )
 
         self.body_layout = QVBoxLayout()
@@ -105,7 +105,7 @@ class DebugPanel(QWidget):
             if self.selected_debug == f:
                 self.selected_btn = select_btn
                 self.selected_btn.setStyleSheet(
-                    "font-weight: bold; background-color: #2d6cdf; color: white;"
+                    "font-weight: bold; background-color: #6f7f94; color: #ece4d9; border: 1px solid #7f8fa3;"
                 )
 
         if self.selected_debug not in files:
@@ -142,7 +142,7 @@ class DebugPanel(QWidget):
 
         self.selected_btn = self.sender()
         self.selected_btn.setStyleSheet(
-            "font-weight: bold; background-color: #2d6cdf; color: white;"
+            "font-weight: bold; background-color: #6f7f94; color: #ece4d9; border: 1px solid #7f8fa3;"
         )
 
     def delete_single(self, debug_name):
