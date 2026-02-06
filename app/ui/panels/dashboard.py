@@ -1,5 +1,7 @@
+import cv2
+
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from app.app_state import app_state
@@ -39,6 +41,8 @@ class DashboardPanel(QWidget):
         self.status_label = QLabel("Status: Idle")
         self.strictness_label = QLabel("Detection Strictness")
         self.camera_label = QLabel("Camera Index")
+        self.camera_preview_title = QLabel("Camera Preview")
+        self.camera_preview_hint = QLabel("Is this the right input?")
 
         for label in [
             self.profile_label,
@@ -48,6 +52,8 @@ class DashboardPanel(QWidget):
             self.status_label,
             self.strictness_label,
             self.camera_label,
+            self.camera_preview_title,
+            self.camera_preview_hint,
         ]:
             disable_widget_interaction(label)
             label.setStyleSheet(Styles.info_label())
@@ -110,6 +116,21 @@ class DashboardPanel(QWidget):
             button.setStyleSheet(Styles.button())
             disable_button_focus_rect(button)
 
+        self.camera_preview = QLabel("Camera preview unavailable")
+        self.camera_preview.setMinimumHeight(180)
+        self.camera_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.camera_preview.setStyleSheet(
+            """
+            QLabel {
+                background-color: #f5f6f8;
+                color: #444444;
+                border: 1px solid #d7dbe1;
+                border-radius: 8px;
+                padding: 6px;
+            }
+            """
+        )
+
         layout = QVBoxLayout()
         profile_row = QHBoxLayout()
         profile_row.addWidget(self.profile_label)
@@ -128,6 +149,9 @@ class DashboardPanel(QWidget):
 
         layout.addWidget(self.frame_label)
         layout.addWidget(self.ref_label)
+        layout.addWidget(self.camera_preview_title)
+        layout.addWidget(self.camera_preview_hint)
+        layout.addWidget(self.camera_preview)
         layout.addWidget(self.profile_preview)
         layout.addWidget(self.monitor_label)
         layout.addWidget(self.status_label)
@@ -179,6 +203,8 @@ class DashboardPanel(QWidget):
             return
 
         self.monitor_controller.start()
+        self.camera_preview.setPixmap(QPixmap())
+        self.camera_preview.setText("Snapshot paused while monitoring")
         self.status_label.setText(f"Monitoring started ({app_state.selected_reference})")
         self.refresh()
 
@@ -189,6 +215,16 @@ class DashboardPanel(QWidget):
         self.monitor_controller.stop()
         self.status_label.setText("Monitoring stopped")
         self.refresh()
+
+    def closeEvent(self, event):
+        super().closeEvent(event)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.capture_camera_snapshot()
 
     def close(self):
         self.monitor_controller.stop()
@@ -207,6 +243,9 @@ class DashboardPanel(QWidget):
         self.update_detection_strictness()
         self.update_camera_indices()
         self.update_profile_preview()
+        if app_state.monitoring_active:
+            self.camera_preview.setPixmap(QPixmap())
+            self.camera_preview.setText("Snapshot paused while monitoring")
 
     def update_detection_strictness(self):
         profile = app_state.active_profile
@@ -272,6 +311,67 @@ class DashboardPanel(QWidget):
         if camera_index is None:
             return
         set_profile_camera_index(profile, camera_index)
+        self.capture_camera_snapshot()
+
+    def capture_camera_snapshot(self):
+        if app_state.monitoring_active:
+            self.camera_preview.setPixmap(QPixmap())
+            self.camera_preview.setText("Snapshot paused while monitoring")
+            return
+        if not self.isVisible():
+            return
+
+        profile = app_state.active_profile
+        if not profile:
+            self.camera_preview.setPixmap(QPixmap())
+            self.camera_preview.setText("Camera preview unavailable")
+            return
+
+        camera_index = get_profile_camera_index(profile)
+        # One-shot snapshots avoid camera contention with monitoring capture and keep UI threading simple.
+        cap = cv2.VideoCapture(camera_index)
+        try:
+            if not cap.isOpened():
+                self.camera_preview.setPixmap(QPixmap())
+                self.camera_preview.setText(f"No signal from camera {camera_index}")
+                return
+
+            ok, frame = cap.read()
+            if not ok:
+                self.camera_preview.setPixmap(QPixmap())
+                self.camera_preview.setText(f"No signal from camera {camera_index}")
+                return
+        finally:
+            cap.release()
+
+        max_preview_width = 420
+        height, width = frame.shape[:2]
+        if width > max_preview_width:
+            scale = max_preview_width / float(width)
+            frame = cv2.resize(
+                frame,
+                (max_preview_width, max(1, int(height * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        height, width, channels = frame.shape
+        image = QImage(frame.data, width, height, channels * width, QImage.Format.Format_RGB888).copy()
+
+        painter = QPainter(image)
+        painter.setPen(QPen(Qt.GlobalColor.white))
+        painter.drawText(10, 24, f"Camera Index: {camera_index}")
+        painter.end()
+
+        pixmap = QPixmap.fromImage(image)
+        self.camera_preview.setPixmap(
+            pixmap.scaled(
+                self.camera_preview.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        self.camera_preview.setText("")
 
     def update_profile_preview(self):
         if not app_state.active_profile:
