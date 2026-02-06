@@ -7,6 +7,8 @@ from PyQt6.QtWidgets import (
     QStyle,
 )
 from PyQt6.QtGui import QIcon, QShortcut, QKeySequence
+from pathlib import Path
+
 from PyQt6.QtCore import QSettings
 
 from app.ui.nav_bar import NavBar
@@ -33,21 +35,6 @@ class AppShell(QWidget):
 
         self.stack = QStackedLayout()
         self.nav_bar = NavBar()
-
-        self.setStyleSheet(
-            "QWidget { background-color: #2f2a25; color: #d8d1c8; }"
-            "QPushButton {"
-            " background-color: #3a352f; color: #d8d1c8; border: 1px solid #595148;"
-            " border-radius: 8px; padding: 6px 10px;"
-            "}"
-            "QPushButton:hover { background-color: #7a889a; }"
-            "QLabel { color: #d8d1c8; }"
-            "QComboBox {"
-            " background-color: #3a352f; color: #d8d1c8; border: 1px solid #595148;"
-            " border-radius: 6px; padding: 4px 8px;"
-            "}"
-            "QScrollArea { border: 1px solid #595148; border-radius: 8px; }"
-        )
 
         self.load_app_icon()
         self.icon_shortcut = QShortcut(QKeySequence("Ctrl+Shift+I"), self)
@@ -89,6 +76,14 @@ class AppShell(QWidget):
                 if app:
                     app.setWindowIcon(icon)
                 return
+        bundled_icon_path = Path(__file__).resolve().parents[2] / "assets" / "app_icon.png"
+        bundled_icon = QIcon(str(bundled_icon_path))
+        if not bundled_icon.isNull():
+            self.setWindowIcon(bundled_icon)
+            if app:
+                app.setWindowIcon(bundled_icon)
+            return
+
         default_icon = self.style().standardIcon(
             QStyle.StandardPixmap.SP_ComputerIcon
         )
