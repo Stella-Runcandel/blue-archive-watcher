@@ -11,7 +11,6 @@ from core.profiles import (
 
 EXIT_TIMEOUT = 0.6             # seconds dialogue must disappear to reset
 
-_DEBUG_SIMILARITY_THRESHOLD = 2.0
 
 
 @dataclass
@@ -82,27 +81,6 @@ def refrence_selector(profile_name):
     return True, f"Reference saved as {os.path.basename(ref_path)}"
 
 
-def _frames_similar(current_frame, last_frame):
-    if last_frame is None:
-        return False
-    current_gray = (
-        cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
-        if current_frame.ndim == 3 else current_frame
-    )
-    last_gray = (
-        cv2.cvtColor(last_frame, cv2.COLOR_BGR2GRAY)
-        if last_frame.ndim == 3 else last_frame
-    )
-    if current_gray.shape != last_gray.shape:
-        last_gray = cv2.resize(
-            last_gray,
-            (current_gray.shape[1], current_gray.shape[0]),
-            interpolation=cv2.INTER_AREA
-        )
-    diff = cv2.absdiff(current_gray, last_gray)
-    return diff.mean() <= _DEBUG_SIMILARITY_THRESHOLD
-
-
 def _enforce_retention(directory, prefix, keep_count):
     if keep_count <= 0 or not os.path.isdir(directory):
         return
@@ -165,7 +143,6 @@ def frame_comp_from_array(profile_name, frame, state):
         return False
 
     profile_valid = os.path.isdir(profile_path(profile_name))
-    _save_capture_snapshot(profile_name, frame)
 
     frame_gray = (
         cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -183,29 +160,29 @@ def frame_comp_from_array(profile_name, frame, state):
         if state.active_dialogue != matched_ref:
             state.active_dialogue = matched_ref
 
+        # Save exactly one debug artifact per detection event.
         if event_start:
             debug = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
             x, y, w, h = match_bbox
             cv2.rectangle(debug, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-            if not _frames_similar(debug, state.last_debug_frame):
-                state.debug_counter += 1
-                debug_dir, _ = get_debug_dir(
-                    profile_name if profile_valid else None,
-                    allow_fallback=True
+            state.debug_counter += 1
+            debug_dir, _ = get_debug_dir(
+                profile_name if profile_valid else None,
+                allow_fallback=True
+            )
+            if debug_dir:
+                debug_path = os.path.join(
+                    debug_dir,
+                    f"match_{state.debug_counter:04d}.png"
                 )
-                if debug_dir:
-                    debug_path = os.path.join(
-                        debug_dir,
-                        f"match_{state.debug_counter:04d}.png"
-                    )
-                    cv2.imwrite(debug_path, debug)
-                    state.last_debug_frame = debug
-                    _enforce_retention(
-                        debug_dir,
-                        prefix="match_",
-                        keep_count=ARTIFACT_POLICY["debug_retention_count"],
-                    )
+                cv2.imwrite(debug_path, debug)
+                state.last_debug_frame = debug
+                _enforce_retention(
+                    debug_dir,
+                    prefix="match_",
+                    keep_count=ARTIFACT_POLICY["debug_retention_count"],
+                )
 
         return True
 
