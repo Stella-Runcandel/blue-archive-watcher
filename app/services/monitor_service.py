@@ -1,108 +1,185 @@
+"""Monitoring service orchestrating FFmpeg capture and processing threads."""
 import logging
+import threading
 import time
-import cv2
 
+import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from app.app_state import app_state
+from app.services.ffmpeg_tools import CaptureConfig, FfmpegNotFoundError
+from app.services.monitor_pipeline import FrameQueue, FfmpegCapture
 from core import detector as dect
 from core import notifier as notif
 from core.profiles import (
-    get_profile_camera_index,
+    get_profile_camera_device,
     get_profile_dirs,
-    has_profile_camera_index,
-    set_profile_camera_index,
+    get_profile_fps,
+    get_profile_frame_size,
+    get_profile_frame_size_fallback,
 )
-from app.app_state import app_state
 
 
 class MonitorService(QThread):
     """Background thread that captures camera frames and runs detection. Emits status on match."""
 
     status = pyqtSignal(str)
+    metrics = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
         self.running = False
         self.detector_state = dect.new_detector_state()
-
-    def _list_available_camera_indices(self, max_devices=10):
-        # Probing indices may briefly activate physical cameras as OpenCV opens each device.
-        available = []
-        for index in range(max_devices):
-            cap = cv2.VideoCapture(index)
-            try:
-                if cap.isOpened():
-                    available.append(index)
-            finally:
-                cap.release()
-        return available
-
-    def list_available_camera_indices(self, max_devices=10):
-        return self._list_available_camera_indices(max_devices=max_devices)
+        self._stop_event = threading.Event()
+        self._capture = None
+        self._processing_thread = None
 
     def run(self):
-        """Capture from camera, run detection on each frame, alert on match. Uses selected_reference when set."""
+        """Run capture + processing loops in background threads (non-UI)."""
         try:
             profile = app_state.active_profile
             if not profile:
                 self.status.emit("No profile selected")
                 return
 
+            get_profile_dirs(profile)
+            device_name = get_profile_camera_device(profile)
+            if not device_name:
+                self.status.emit("No camera selected")
+                return
+
+            width, height = get_profile_frame_size(profile)
+            if not width or not height:
+                width, height = get_profile_frame_size_fallback()
+                logging.warning("Profile frame size not found; using fallback %sx%s", width, height)
+
+            fps = get_profile_fps(profile)
+
             app_state.monitoring_active = True
             self.running = True
+            self._stop_event.clear()
             self.status.emit("Monitoring...")
             self.detector_state = dect.new_detector_state()
+            logging.info(
+                "Monitoring start profile=%s device=%s fps=%s size=%sx%s",
+                profile,
+                device_name,
+                fps,
+                width,
+                height,
+            )
 
-            get_profile_dirs(profile)
-            camera_index = get_profile_camera_index(profile)
-            if not has_profile_camera_index(profile):
-                available = self._list_available_camera_indices()
-                if available:
-                    camera_index = available[0]
-                    set_profile_camera_index(profile, camera_index)
-
-            cap = None
+            queue = FrameQueue(maxlen=8)
+            config = CaptureConfig(width=width, height=height, fps=fps)
             try:
-                cap = cv2.VideoCapture(camera_index)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+                self._capture = FfmpegCapture(device_name, config, queue)
+                self._capture.start()
+            except FfmpegNotFoundError as exc:
+                self.status.emit(f"FFmpeg not found ({exc})")
+                return
+            except Exception:
+                logging.error("FFmpeg capture failed to start", exc_info=True)
+                self.status.emit("FFmpeg capture failed")
+                return
 
-                if not cap.isOpened():
-                    self.status.emit(f"Camera failed ({camera_index}). Select another camera index.")
-                    return
-                logging.info("Using camera index %s", camera_index)
+            self._processing_thread = threading.Thread(
+                target=self._processing_loop,
+                args=(profile, queue, width, height),
+                daemon=True,
+            )
+            self._processing_thread.start()
 
-                while self.running:
-                    ret, frame = cap.read()
-                    if not ret:
-                        continue
-
-                    try:
-                        selected_ref = app_state.selected_reference
-                        if dect.frame_comp_from_array(
-                            profile,
-                            frame,
-                            self.detector_state,
-                            selected_reference=selected_ref,
-                        ):
-                            self.status.emit("Dialogue detected!")
-                            try:
-                                notif.alert()
-                            except Exception:
-                                logging.error("Alert backend failure", exc_info=True)
-                    except Exception:
-                        logging.error("Detection crash", exc_info=True)
-                        continue
-
-                    self.msleep(50)
-            finally:
-                if cap is not None:
-                    cap.release()
+            while not self._stop_event.is_set():
+                if self._capture and self._capture.process and self._capture.process.poll() is not None:
+                    logging.error("FFmpeg exited unexpectedly")
+                    self.status.emit("FFmpeg exited unexpectedly")
+                    break
+                time.sleep(0.2)
         finally:
+            self.stop()
             self.running = False
             app_state.monitoring_active = False
             self.status.emit("Stopped")
+            logging.info("Monitoring stopped")
+
+    def _processing_loop(self, profile, queue, width, height):
+        """Process frames off the queue and emit deterministic detection results."""
+        processed = 0
+        last_metrics = time.time()
+        last_confidence = 0.0
+        selected_reference = app_state.selected_reference
+        last_detection_time = None
+
+        while not self._stop_event.is_set():
+            item = queue.get(timeout=0.5)
+            if item is None:
+                continue
+
+            _timestamp, raw = item
+            frame = np.frombuffer(raw, dtype=np.uint8)
+            expected = width * height * 3
+            if frame.size != expected:
+                logging.warning("Frame size mismatch: got %s expected %s", frame.size, expected)
+                continue
+
+            frame = frame.reshape((height, width, 3))
+            try:
+                result = dect.evaluate_frame(
+                    profile,
+                    frame,
+                    self.detector_state,
+                    selected_reference=selected_reference,
+                )
+                last_confidence = result.confidence
+                if result.matched:
+                    self.status.emit("Dialogue detected!")
+                    last_detection_time = result.timestamp
+                    try:
+                        notif.alert()
+                    except Exception:
+                        logging.error("Alert backend failure", exc_info=True)
+            except Exception:
+                logging.error("Detection crash", exc_info=True)
+                self.status.emit("Detection failure")
+                self._stop_event.set()
+                break
+
+            processed += 1
+            now = time.time()
+            if now - last_metrics >= 5:
+                capture_fps = 0.0
+                dropped = queue.dropped
+                if self._capture:
+                    capture_fps = self._capture.frames_captured / max(0.001, now - last_metrics)
+                    self._capture.frames_captured = 0
+                process_fps = processed / max(0.001, now - last_metrics)
+                logging.info(
+                    "Monitor metrics: capture_fps=%.2f process_fps=%.2f dropped=%s confidence=%.4f",
+                    capture_fps,
+                    process_fps,
+                    dropped,
+                    last_confidence,
+                )
+                queue_fill = (queue.size() / max(1, queue.maxlen)) * 100
+                self.metrics.emit(
+                    {
+                        "capture_fps": capture_fps,
+                        "process_fps": process_fps,
+                        "dropped": dropped,
+                        "queue_fill": queue_fill,
+                        "profile": profile,
+                        "monitoring": True,
+                        "last_detection_time": last_detection_time,
+                    }
+                )
+                processed = 0
+                last_metrics = now
 
     def stop(self):
-        self.running = False
+        """Stop capture + processing and release subprocess resources."""
+        self._stop_event.set()
+        if self._capture:
+            self._capture.stop()
+        if self._processing_thread and self._processing_thread.is_alive():
+            self._processing_thread.join(timeout=5)
         app_state.monitoring_active = False

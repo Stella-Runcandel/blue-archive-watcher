@@ -1,4 +1,7 @@
+"""Profile controller coordinating selection and persistence."""
+
 from app.app_state import app_state
+from core import storage
 from core.profiles import (
     create_profile,
     delete_profile,
@@ -31,6 +34,7 @@ class ProfileController:
         app_state.active_profile = name
         app_state.selected_frame = None
         app_state.selected_reference = None
+        storage.set_app_state("active_profile", name)
         return True, "Profile selected."
 
     def create_profile(self, name):
@@ -41,6 +45,7 @@ class ProfileController:
         app_state.active_profile = name
         app_state.selected_frame = None
         app_state.selected_reference = None
+        storage.set_app_state("active_profile", name)
         return True, message
 
     def delete_profile(self, name):

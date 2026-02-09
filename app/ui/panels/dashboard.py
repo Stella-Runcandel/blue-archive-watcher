@@ -1,8 +1,17 @@
-import cv2
+"""Dashboard panel showing monitoring controls and live metrics."""
+import time
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QImage, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtWidgets import (
+    QComboBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
 
 from app.app_state import app_state
 from app.controllers.monitor_controller import MonitorController
@@ -12,10 +21,14 @@ from app.ui.widget_utils import disable_button_focus_rect, disable_widget_intera
 from core import detector as dect
 from core.profiles import (
     get_detection_threshold,
-    get_profile_camera_index,
+    get_profile_camera_device,
+    get_profile_fps,
+    get_profile_frame_size,
+    get_profile_frame_size_fallback,
     get_profile_icon_bytes,
     list_profiles,
-    set_profile_camera_index,
+    set_profile_camera_device,
+    update_profile_fps,
     update_profile_detection_threshold,
 )
 
@@ -39,8 +52,14 @@ class DashboardPanel(QWidget):
         self.ref_label = QLabel("Selected Reference: None")
         self.monitor_label = QLabel("Monitoring: Stopped")
         self.status_label = QLabel("Status: Idle")
+        self.capture_fps_label = QLabel("Capture FPS: --")
+        self.process_fps_label = QLabel("Processing FPS: --")
+        self.dropped_label = QLabel("Dropped Frames: --")
+        self.queue_label = QLabel("Queue Fill: --")
+        self.last_detection_label = QLabel("Last Detection: --")
         self.strictness_label = QLabel("Detection Strictness")
-        self.camera_label = QLabel("Camera Index")
+        self.camera_label = QLabel("Camera Device")
+        self.fps_label = QLabel("Target FPS")
         self.camera_preview_title = QLabel("Camera Preview")
         self.camera_preview_hint = QLabel("Is this the right input?")
 
@@ -50,8 +69,14 @@ class DashboardPanel(QWidget):
             self.ref_label,
             self.monitor_label,
             self.status_label,
+            self.capture_fps_label,
+            self.process_fps_label,
+            self.dropped_label,
+            self.queue_label,
+            self.last_detection_label,
             self.strictness_label,
             self.camera_label,
+            self.fps_label,
             self.camera_preview_title,
             self.camera_preview_hint,
         ]:
@@ -109,6 +134,14 @@ class DashboardPanel(QWidget):
         self.camera_combo = QComboBox()
         self.camera_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.camera_combo.setStyleSheet(self.strictness_combo.styleSheet())
+        self.camera_refresh_btn = QPushButton("↻ Refresh")
+        self.camera_refresh_btn.setStyleSheet(Styles.button())
+        disable_button_focus_rect(self.camera_refresh_btn)
+
+        self.fps_spinbox = QSpinBox()
+        self.fps_spinbox.setRange(1, 60)
+        self.fps_spinbox.setSuffix(" FPS")
+        self.fps_spinbox.setStyleSheet(self.strictness_combo.styleSheet())
 
         self.start_btn = QPushButton("▶ Start Monitoring")
         self.stop_btn = QPushButton("⏹ Stop")
@@ -142,9 +175,15 @@ class DashboardPanel(QWidget):
         strictness_row.addWidget(self.strictness_combo)
         layout.addLayout(strictness_row)
 
+        fps_row = QHBoxLayout()
+        fps_row.addWidget(self.fps_label)
+        fps_row.addWidget(self.fps_spinbox)
+        layout.addLayout(fps_row)
+
         camera_row = QHBoxLayout()
         camera_row.addWidget(self.camera_label)
         camera_row.addWidget(self.camera_combo)
+        camera_row.addWidget(self.camera_refresh_btn)
         layout.addLayout(camera_row)
 
         layout.addWidget(self.frame_label)
@@ -155,12 +194,18 @@ class DashboardPanel(QWidget):
         layout.addWidget(self.profile_preview)
         layout.addWidget(self.monitor_label)
         layout.addWidget(self.status_label)
+        layout.addWidget(self.capture_fps_label)
+        layout.addWidget(self.process_fps_label)
+        layout.addWidget(self.dropped_label)
+        layout.addWidget(self.queue_label)
+        layout.addWidget(self.last_detection_label)
         layout.addWidget(self.start_btn)
         layout.addWidget(self.stop_btn)
         self.setLayout(layout)
 
         self.monitor = MonitorService()
         self.monitor.status.connect(self.status_label.setText)
+        self.monitor.metrics.connect(self.on_metrics_update)
         self.monitor_controller = MonitorController(self.monitor)
         self._cached_available_camera_indices = None
 
@@ -168,10 +213,13 @@ class DashboardPanel(QWidget):
         self.stop_btn.clicked.connect(self.stop)
         self.strictness_combo.currentIndexChanged.connect(self.on_strictness_changed)
         self.camera_combo.currentIndexChanged.connect(self.on_camera_changed)
+        self.camera_refresh_btn.clicked.connect(self.refresh_camera_devices)
+        self.fps_spinbox.valueChanged.connect(self.on_fps_changed)
 
         self.refresh()
 
     def select_profile(self):
+        """Select the first available profile (legacy convenience)."""
         profiles = list_profiles()
         if not profiles:
             self.status_label.setText("No profiles found")
@@ -182,6 +230,7 @@ class DashboardPanel(QWidget):
         self.status_label.setText("Profile selected")
 
     def select_reference(self):
+        """Launch reference selector for the active profile."""
         if not app_state.active_profile:
             self.status_label.setText("Select a profile first")
             return
@@ -191,6 +240,7 @@ class DashboardPanel(QWidget):
         self.status_label.setText(message)
 
     def start(self):
+        """Start monitoring via the controller."""
         if app_state.monitoring_active:
             self.status_label.setText("Monitoring already running")
             return
@@ -208,6 +258,7 @@ class DashboardPanel(QWidget):
         self.refresh()
 
     def stop(self):
+        """Stop monitoring via the controller."""
         if not app_state.monitoring_active:
             self.status_label.setText("Monitoring is not running")
             return
@@ -216,19 +267,24 @@ class DashboardPanel(QWidget):
         self.refresh()
 
     def closeEvent(self, event):
+        """Qt close handler; ensures superclass behavior."""
         super().closeEvent(event)
 
     def hideEvent(self, event):
+        """Qt hide handler; ensures superclass behavior."""
         super().hideEvent(event)
 
     def showEvent(self, event):
+        """Qt show handler; refresh snapshot when visible."""
         super().showEvent(event)
         self.capture_camera_snapshot()
 
     def close(self):
+        """Stop monitoring before panel close."""
         self.monitor_controller.stop()
 
     def refresh(self):
+        """Refresh labels and UI state from app_state."""
         self.profile_label.setText(f"Profile: {app_state.active_profile or 'None'}")
         self.frame_label.setText(f"Selected Frame: {app_state.selected_frame or 'None'}")
         self.ref_label.setText(f"Selected Reference: {app_state.selected_reference or 'None'}")
@@ -237,9 +293,15 @@ class DashboardPanel(QWidget):
             self.monitor_label.setText(f"Monitoring: Running ({app_state.selected_reference})")
         else:
             self.monitor_label.setText("Monitoring: Stopped")
+            self.capture_fps_label.setText("Capture FPS: --")
+            self.process_fps_label.setText("Processing FPS: --")
+            self.dropped_label.setText("Dropped Frames: --")
+            self.queue_label.setText("Queue Fill: --")
+            self.last_detection_label.setText("Last Detection: --")
 
         self.start_btn.setEnabled(app_state.selected_reference is not None and not self.monitor.isRunning())
         self.update_detection_strictness()
+        self.update_fps_setting()
         self.update_camera_indices()
         self.update_profile_preview()
         if app_state.monitoring_active:
@@ -247,6 +309,7 @@ class DashboardPanel(QWidget):
             self.camera_preview.setText("Snapshot paused while monitoring")
 
     def update_detection_strictness(self):
+        """Sync strictness UI with profile threshold."""
         profile = app_state.active_profile
         resolved = get_detection_threshold(profile)
         index = self._strictness_index_for_threshold(resolved)
@@ -255,7 +318,16 @@ class DashboardPanel(QWidget):
         self.strictness_combo.blockSignals(False)
         self.strictness_combo.setEnabled(bool(profile))
 
+    def update_fps_setting(self):
+        """Sync FPS UI with profile setting."""
+        profile = app_state.active_profile
+        self.fps_spinbox.blockSignals(True)
+        self.fps_spinbox.setValue(get_profile_fps(profile))
+        self.fps_spinbox.blockSignals(False)
+        self.fps_spinbox.setEnabled(bool(profile))
+
     def _strictness_index_for_threshold(self, threshold):
+        """Map numeric threshold to the closest strictness index."""
         try:
             target = float(threshold)
         except (TypeError, ValueError):
@@ -263,7 +335,15 @@ class DashboardPanel(QWidget):
         distances = [abs(target - value) for _, value in self.STRICTNESS_OPTIONS]
         return distances.index(min(distances))
 
+    def on_fps_changed(self, value):
+        """Persist FPS changes to the active profile."""
+        profile = app_state.active_profile
+        if not profile:
+            return
+        update_profile_fps(profile, value)
+
     def on_strictness_changed(self, index):
+        """Persist strictness changes to the active profile."""
         if index < 0:
             return
         profile = app_state.active_profile
@@ -273,6 +353,7 @@ class DashboardPanel(QWidget):
         update_profile_detection_threshold(profile, threshold)
 
     def update_camera_indices(self):
+        """Populate camera dropdown from cached enumeration."""
         from app.workers.camera_workers import CameraProbeWorker
 
         profile = app_state.active_profile
@@ -282,16 +363,16 @@ class DashboardPanel(QWidget):
         if not profile:
             self.camera_combo.blockSignals(False)
             self.camera_combo.setEnabled(False)
+            self.camera_refresh_btn.setEnabled(False)
             return
 
-        current_index = get_profile_camera_index(profile)
-
+        current_device = get_profile_camera_device(profile)
         if self._cached_available_camera_indices is None:
             self.camera_combo.addItem("Scanning cameras...")
             self.camera_combo.setEnabled(False)
 
-            if current_index is not None:
-                self.camera_combo.addItem(str(current_index), current_index)
+            if current_device:
+                self.camera_combo.addItem(str(current_device), current_device)
                 self.camera_combo.setCurrentIndex(1)
 
             self._camera_probe_worker = CameraProbeWorker()
@@ -304,32 +385,35 @@ class DashboardPanel(QWidget):
             return
 
         options = list(self._cached_available_camera_indices)
-        if current_index not in options:
-            options.append(current_index)
+        if current_device and current_device not in options:
+            options.append(current_device)
 
-        for idx in sorted(set(options)):
-            self.camera_combo.addItem(str(idx), idx)
+        for device in sorted(set(options)):
+            self.camera_combo.addItem(str(device), device)
 
-        selected = self.camera_combo.findData(current_index)
+        selected = self.camera_combo.findData(current_device)
         if selected >= 0:
             self.camera_combo.setCurrentIndex(selected)
 
         self.camera_combo.blockSignals(False)
         self.camera_combo.setEnabled(self.camera_combo.count() > 0)
+        self.camera_refresh_btn.setEnabled(True)
 
     def on_camera_changed(self, index):
+        """Persist camera selection and refresh snapshot."""
         if index < 0:
             return
         profile = app_state.active_profile
         if not profile:
             return
-        camera_index = self.camera_combo.itemData(index)
-        if camera_index is None:
+        device_name = self.camera_combo.itemData(index)
+        if device_name is None:
             return
-        set_profile_camera_index(profile, camera_index)
+        set_profile_camera_device(profile, device_name)
         self.capture_camera_snapshot()
     
     def capture_camera_snapshot(self):
+        """Capture a single preview frame in the background."""
         from app.workers.camera_workers import CameraSnapshotWorker
 
         if app_state.monitoring_active:
@@ -346,16 +430,20 @@ class DashboardPanel(QWidget):
             self.camera_preview.setText("Camera preview unavailable")
             return
 
-        camera_index = get_profile_camera_index(profile)
+        device_name = get_profile_camera_device(profile)
         self.camera_preview.setText("Loading...")
-
-        self._snapshot_worker = CameraSnapshotWorker(camera_index)
+        width, height = get_profile_frame_size(profile)
+        if not width or not height:
+            width, height = get_profile_frame_size_fallback()
+        fps = get_profile_fps(profile)
+        self._snapshot_worker = CameraSnapshotWorker(device_name, width, height, fps)
         self._snapshot_worker.snapshotReady.connect(self._on_snapshot_ready)
         self._snapshot_worker.snapshotFailed.connect(self._on_snapshot_failed)
         self._snapshot_worker.start()
 
 
     def update_profile_preview(self):
+        """Render profile icon preview."""
         if not app_state.active_profile:
             self.profile_preview_bytes = None
             self.profile_preview.setText("No profile preview")
@@ -379,7 +467,24 @@ class DashboardPanel(QWidget):
         )
         self.profile_preview.setText("")
 
+    def on_metrics_update(self, payload):
+        """Update live metrics labels from background thread."""
+        capture_fps = payload.get("capture_fps", 0.0)
+        process_fps = payload.get("process_fps", 0.0)
+        dropped = payload.get("dropped", 0)
+        queue_fill = payload.get("queue_fill", 0.0)
+        last_detection_time = payload.get("last_detection_time")
+        self.capture_fps_label.setText(f"Capture FPS: {capture_fps:.2f}")
+        self.process_fps_label.setText(f"Processing FPS: {process_fps:.2f}")
+        self.dropped_label.setText(f"Dropped Frames: {dropped}")
+        self.queue_label.setText(f"Queue Fill: {queue_fill:.0f}%")
+        if last_detection_time:
+            self.last_detection_label.setText(f"Last Detection: {time.ctime(last_detection_time)}")
+        else:
+            self.last_detection_label.setText("Last Detection: --")
+
     def resizeEvent(self, event):
+        """Resize handler to scale previews."""
         super().resizeEvent(event)
         if not self.profile_preview_bytes:
             return
@@ -394,10 +499,17 @@ class DashboardPanel(QWidget):
         )
 
     def _on_camera_indices_ready(self, indices):
+        """Handle FFmpeg device enumeration completion."""
         self._cached_available_camera_indices = indices
         self.update_camera_indices()
 
+    def refresh_camera_devices(self):
+        """Force camera enumeration refresh."""
+        self._cached_available_camera_indices = None
+        self.update_camera_indices()
+
     def _on_snapshot_ready(self, image):
+        """Display camera preview snapshot."""
         pixmap = QPixmap.fromImage(image)
         self.camera_preview.setPixmap(
             pixmap.scaled(
@@ -409,5 +521,6 @@ class DashboardPanel(QWidget):
         self.camera_preview.setText("")
 
     def _on_snapshot_failed(self, message):
+        """Display snapshot error message."""
         self.camera_preview.setPixmap(QPixmap())
         self.camera_preview.setText(message)

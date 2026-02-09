@@ -1,3 +1,4 @@
+"""Debug panel for viewing and deleting bounded debug images."""
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
@@ -12,7 +13,6 @@ from PyQt6.QtWidgets import (
 
 from app.app_state import app_state
 from app.ui.panel_header import PanelHeader
-from core import detector as dect
 from app.ui.theme import Styles
 from app.ui.widget_utils import disable_button_focus_rect, disable_widget_interaction, make_preview_label
 from core.profiles import (
@@ -71,6 +71,7 @@ class DebugPanel(QWidget):
         self.setLayout(layout)
 
     def refresh_debug(self):
+        """Refresh debug list and preview based on active profile."""
         self.selected_btn = None
         while self.body_layout.count():
             item = self.body_layout.takeAt(0)
@@ -120,6 +121,7 @@ class DebugPanel(QWidget):
             self.update_preview(None)
 
     def delete_all(self):
+        """Delete all debug images for the selected filter."""
         profile = self.debug_profile
         if not self.debug_fallback and not profile:
             return
@@ -133,14 +135,13 @@ class DebugPanel(QWidget):
         if confirm != QMessageBox.StandardButton.Yes:
             return
         _, bytes_freed = delete_all_debug_frames(profile, allow_fallback=self.debug_fallback)
-        if bytes_freed > 0:
-            dect.notify_debug_storage_freed(bytes_freed)
         self.selected_debug = None
         self.selected_btn = None
         self.update_preview(None)
         self.refresh_debug()
 
     def select_debug(self, debug_name):
+        """Select a debug image for preview."""
         self.selected_debug = debug_name
         self.update_preview(debug_name)
         if self.selected_btn:
@@ -149,6 +150,7 @@ class DebugPanel(QWidget):
         self.selected_btn.setStyleSheet(Styles.selected_button())
 
     def delete_single(self, debug_name):
+        """Delete a single debug image."""
         target = "global debug frame" if self.debug_fallback else "debug frame"
         confirm = QMessageBox.question(
             self,
@@ -162,8 +164,6 @@ class DebugPanel(QWidget):
         if not success:
             QMessageBox.warning(self, "Delete Debug Frame", "Debug frame could not be deleted.")
             return
-        if bytes_freed > 0:
-            dect.notify_debug_storage_freed(bytes_freed)
         if self.selected_debug == debug_name:
             self.selected_debug = None
             self.selected_btn = None
@@ -171,6 +171,7 @@ class DebugPanel(QWidget):
         self.refresh_debug()
 
     def update_preview(self, debug_name):
+        """Update preview image for selected debug frame."""
         if not debug_name:
             self.preview_bytes = None
             self.preview_label.setText("No debug preview")
@@ -195,6 +196,7 @@ class DebugPanel(QWidget):
         self.preview_label.setText("")
 
     def resizeEvent(self, event):
+        """Resize handler to scale preview."""
         super().resizeEvent(event)
         if not self.preview_bytes:
             return

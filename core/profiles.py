@@ -1,26 +1,32 @@
 """Profile and data management for FrameTrace.
 
-Manages the Data/Profiles directory structure: each profile has frames/,
-references/, captures/, debug/, and meta.json. Handles validation, CRUD
-operations, and asset paths with safe realpath checks to prevent traversal.
+Design:
+- SQLite stores metadata (profiles, frames, references, debug).
+- Filesystem stores images under Data/Profiles and Data/Debug.
 """
 import os
-import json
-from datetime import datetime
 import re
 import shutil
 
+from core import storage
+
 BASE_DIR = os.path.join("Data", "Profiles")
-DEBUG_FALLBACK_DIR = os.path.join("Data", "Debug")
+DEBUG_DIR = os.path.join("Data", "Debug")
 DEBUG_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 DEFAULT_DETECTION_THRESHOLD = 0.70
 MIN_DETECTION_THRESHOLD = 0.50
 MAX_DETECTION_THRESHOLD = 0.95
+DEFAULT_TARGET_FPS = 30
+MIN_TARGET_FPS = 1
+MAX_TARGET_FPS = 60
+DEFAULT_FRAME_SIZE = (1280, 720)
 
 def profile_path(name):
+    """Return filesystem path for a profile root directory."""
     return os.path.join(BASE_DIR, name)
 
 def validate_profile_name(profile_name):
+    """Validate profile name for safe filesystem storage."""
     if not profile_name:
         return False, "Profile name cannot be empty."
     name = profile_name.strip()
@@ -37,17 +43,26 @@ def validate_profile_name(profile_name):
     return True, ""
 
 def list_profiles():
+    """Return profile names from SQLite, migrating filesystem directories if needed."""
+    profiles = storage.list_profiles()
+    if profiles:
+        return profiles
     if not os.path.exists(BASE_DIR):
         return []
-    profiles = [
+    discovered = [
         d for d in os.listdir(BASE_DIR)
         if os.path.isdir(profile_path(d))
     ]
-    return sorted(profiles, key=str.lower)
+    for name in discovered:
+        try:
+            storage.create_profile(name)
+        except Exception:
+            continue
+    return sorted(discovered, key=str.lower)
 
 
 def get_profile_dirs(profile_name):
-    """Ensure profile directories exist and return paths dict (root, frames, references, captures, debug, meta)."""
+    """Ensure profile directories exist and return paths dict (root, frames, references, captures)."""
     root = os.path.join(BASE_DIR, profile_name)
 
     dirs = {
@@ -55,17 +70,10 @@ def get_profile_dirs(profile_name):
         "references": os.path.join(root, "references"),
         "captures": os.path.join(root, "captures"),
         "frames": os.path.join(root, "frames"),
-        "debug": os.path.join(root, "debug"),
-        "meta": os.path.join(root, "meta.json"),
     }
 
     for k, path in dirs.items():
-        if k != "meta":
-            os.makedirs(path, exist_ok=True)
-
-    if not os.path.exists(dirs["meta"]):
-        with open(dirs["meta"], "w") as f:
-            json.dump({"name": profile_name}, f, indent=2)
+        os.makedirs(path, exist_ok=True)
 
     return dirs
 
@@ -78,29 +86,16 @@ def create_profile(profile_name):
     if not valid:
         return False, message
     base = os.path.join(BASE_DIR, profile_name)
-
     if os.path.exists(base):
         return False, "A profile with that name already exists."
-
     os.makedirs(os.path.join(base, "frames"), exist_ok=True)
     os.makedirs(os.path.join(base, "references"), exist_ok=True)
     os.makedirs(os.path.join(base, "captures"), exist_ok=True)
-    os.makedirs(os.path.join(base, "debug"), exist_ok=True)
-
-    meta_path = os.path.join(base, "meta.json")
-    with open(meta_path, "w") as f:
-        json.dump(
-            {
-                "name": profile_name,
-                "created_at": datetime.now().isoformat()
-            },
-            f,
-            indent=2
-        )
-
+    storage.create_profile(profile_name)
     return True, f"Profile '{profile_name}' created."
 
 def delete_profile(profile_name):
+    """Delete a profile and its filesystem contents."""
     """Remove a profile and its data. Returns (success, message). Validates path to prevent traversal."""
     valid, message = validate_profile_name(profile_name)
     if not valid:
@@ -112,10 +107,12 @@ def delete_profile(profile_name):
     if not os.path.exists(target):
         return False, "Profile not found."
     shutil.rmtree(target)
+    storage.delete_profile(profile_name)
     return True, f"Profile '{profile_name}' deleted."
 
 
 def _is_valid_asset_name(name):
+    """Validate asset filenames to avoid traversal."""
     if not name:
         return False
     if name in {".", ".."}:
@@ -128,6 +125,7 @@ def _is_valid_asset_name(name):
 
 
 def _safe_realpath(base_dir, name):
+    """Return safe realpath or None if outside base_dir."""
     path = os.path.realpath(os.path.join(base_dir, name))
     base = os.path.realpath(base_dir)
     if not path.startswith(base + os.path.sep):
@@ -136,25 +134,18 @@ def _safe_realpath(base_dir, name):
 
 
 def _is_supported_debug_name(name):
+    """Return True if filename is a supported debug image."""
     return name.lower().endswith(DEBUG_EXTENSIONS)
 
 
-def get_debug_dir(profile_name, allow_fallback=False):
-    if profile_name:
-        valid, _ = validate_profile_name(profile_name)
-        if valid:
-            root = profile_path(profile_name)
-            if os.path.isdir(root):
-                debug_dir = os.path.join(root, "debug")
-                os.makedirs(debug_dir, exist_ok=True)
-                return debug_dir, False
-    if allow_fallback:
-        os.makedirs(DEBUG_FALLBACK_DIR, exist_ok=True)
-        return DEBUG_FALLBACK_DIR, True
-    return None, False
+def get_debug_dir():
+    """Return global debug directory path (created if missing)."""
+    os.makedirs(DEBUG_DIR, exist_ok=True)
+    return DEBUG_DIR
 
 
 def _clamp_detection_threshold(value):
+    """Clamp detection threshold within bounds."""
     try:
         numeric = float(value)
     except (TypeError, ValueError):
@@ -163,158 +154,124 @@ def _clamp_detection_threshold(value):
 
 
 def get_detection_threshold(profile_name):
-    threshold = None
-    if profile_name:
-        dirs = get_profile_dirs(profile_name)
-        meta_path = dirs["meta"]
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r") as f:
-                    data = json.load(f) or {}
-                if "detection_threshold" in data:
-                    threshold = data.get("detection_threshold")
-            except Exception:
-                threshold = None
+    """Fetch profile detection threshold from SQLite with defaults."""
+    record = storage.get_profile(profile_name) if profile_name else None
+    threshold = record.detection_threshold if record else None
     if threshold is None:
         threshold = DEFAULT_DETECTION_THRESHOLD
     return _clamp_detection_threshold(threshold)
 
 
 def update_profile_detection_threshold(profile_name, threshold):
+    """Persist detection threshold for a profile."""
     if not profile_name:
         return False
-    dirs = get_profile_dirs(profile_name)
-    meta_path = dirs["meta"]
-    data = {"name": profile_name}
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r") as f:
-                data.update(json.load(f) or {})
-        except Exception:
-            pass
     threshold_value = _clamp_detection_threshold(threshold)
-    if threshold_value == DEFAULT_DETECTION_THRESHOLD:
-        if "detection_threshold" not in data:
-            return False
-        data.pop("detection_threshold", None)
-    else:
-        data["detection_threshold"] = threshold_value
-    with open(meta_path, "w") as f:
-        json.dump(data, f, indent=2)
+    storage.update_profile_fields(profile_name, detection_threshold=threshold_value)
     return True
 
 
-
-
-def has_profile_camera_index(profile_name):
-    if not profile_name:
-        return False
-    dirs = get_profile_dirs(profile_name)
-    meta_path = dirs["meta"]
-    if not os.path.exists(meta_path):
-        return False
+def _clamp_target_fps(value):
+    """Clamp target FPS within bounds."""
     try:
-        with open(meta_path, "r") as f:
-            data = json.load(f) or {}
-        return "camera_index" in data
-    except Exception:
-        return False
-
-
-def get_profile_camera_index(profile_name):
-    camera_index = 2
-    if not profile_name:
-        return camera_index
-    dirs = get_profile_dirs(profile_name)
-    meta_path = dirs["meta"]
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r") as f:
-                data = json.load(f) or {}
-            camera_index = int(data.get("camera_index", camera_index))
-        except Exception:
-            camera_index = 2
-    return camera_index
-
-
-def set_profile_camera_index(profile_name, camera_index):
-    if not profile_name:
-        return False
-    dirs = get_profile_dirs(profile_name)
-    meta_path = dirs["meta"]
-    data = {"name": profile_name}
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r") as f:
-                data.update(json.load(f) or {})
-        except Exception:
-            pass
-    try:
-        data["camera_index"] = int(camera_index)
+        numeric = int(value)
     except (TypeError, ValueError):
+        numeric = DEFAULT_TARGET_FPS
+    return max(MIN_TARGET_FPS, min(MAX_TARGET_FPS, numeric))
+
+
+def get_profile_fps(profile_name):
+    """Fetch target FPS for a profile from SQLite."""
+    fps = None
+    if profile_name:
+        record = storage.get_profile(profile_name)
+        fps = record.target_fps if record else None
+    if fps is None:
+        fps = DEFAULT_TARGET_FPS
+    return _clamp_target_fps(fps)
+
+
+def update_profile_fps(profile_name, fps):
+    """Persist target FPS for a profile."""
+    if not profile_name:
         return False
-    with open(meta_path, "w") as f:
-        json.dump(data, f, indent=2)
+    fps_value = _clamp_target_fps(fps)
+    storage.update_profile_fields(profile_name, target_fps=fps_value)
     return True
 
-def list_frames(profile_name):
+
+def get_profile_camera_device(profile_name):
+    """Fetch camera device name for a profile."""
+    if not profile_name:
+        return None
+    record = storage.get_profile(profile_name)
+    return record.camera_device if record else None
+
+
+def set_profile_camera_device(profile_name, device_name):
+    """Persist camera device name for a profile."""
+    if not profile_name:
+        return False
+    if not device_name:
+        return False
+    storage.update_profile_fields(profile_name, camera_device=str(device_name))
+    return True
+
+
+def get_profile_frame_size(profile_name):
+    """Return width/height of first frame image for the profile."""
+    import cv2
+    if not profile_name:
+        return None, None
     dirs = get_profile_dirs(profile_name)
     frames_dir = dirs["frames"]
     if not os.path.isdir(frames_dir):
-        return []
-    frames = [
-        f for f in os.listdir(frames_dir)
-        if f.lower().endswith((".png", ".jpg", ".jpeg"))
-    ]
-    return sorted(frames, key=str.lower)
+        return None, None
+    for name in sorted(os.listdir(frames_dir), key=str.lower):
+        if not name.lower().endswith((".png", ".jpg", ".jpeg")):
+            continue
+        path = os.path.join(frames_dir, name)
+        frame = cv2.imread(path)
+        if frame is None:
+            continue
+        height, width = frame.shape[:2]
+        if width > 0 and height > 0:
+            return width, height
+    return None, None
+
+
+def get_profile_frame_size_fallback():
+    """Return fallback capture resolution when frames are missing."""
+    return DEFAULT_FRAME_SIZE
+
+
+
+
+def list_frames(profile_name):
+    """List frame names for a profile from SQLite."""
+    return storage.list_frames(profile_name)
 
 
 def list_references(profile_name):
-    dirs = get_profile_dirs(profile_name)
-    ref_dir = dirs["references"]
-    if not os.path.isdir(ref_dir):
-        return []
-    refs = [
-        f for f in os.listdir(ref_dir)
-        if f.lower().endswith(".png")
-    ]
-    return sorted(refs, key=str.lower)
+    """List reference names for a profile from SQLite."""
+    return storage.list_references(profile_name)
 
 
 def list_debug_frames(profile_name, allow_fallback=False):
-    # MEDIUM 2: fallback listing is exclusive (profile OR global), never both.
-    debug_dir, _ = get_debug_dir(profile_name, allow_fallback=allow_fallback)
-    if not debug_dir or not os.path.isdir(debug_dir):
-        return []
-    files = [
-        f for f in os.listdir(debug_dir)
-        if f.lower().endswith(DEBUG_EXTENSIONS)
-    ]
-    return sorted(files, key=str.lower)
+    """List debug image names, optionally filtering by profile."""
+    profile_filter = profile_name if not allow_fallback else None
+    entries = storage.list_debug_entries(profile_filter)
+    return [os.path.basename(entry["path"]) for entry in entries]
 
 
 def get_reference_parent_frame(profile_name, ref_name):
-    dirs = get_profile_dirs(profile_name)
-    meta_path = os.path.join(
-        dirs["references"],
-        ref_name.replace(".png", ".json")
-    )
-
-    if not os.path.exists(meta_path):
-        return "legacy"
-
-    try:
-        with open(meta_path, "r") as f:
-            content = f.read().strip()
-            if not content:
-                return "legacy"
-            data = json.loads(content)
-            return data.get("parent_frame", "legacy")
-    except Exception:
-        return "legacy"
+    """Return parent frame name stored for the reference."""
+    frame_name = storage.get_reference_parent_frame(profile_name, ref_name)
+    return frame_name or "legacy"
 
 
 def _load_image_bytes(path):
+    """Read image bytes from disk or return None."""
     if not path or not os.path.exists(path):
         return None
     if not os.path.isfile(path):
@@ -327,6 +284,7 @@ def _load_image_bytes(path):
 
 
 def get_frame_image_bytes(profile_name, frame_name):
+    """Load frame image bytes from disk."""
     if not _is_valid_asset_name(frame_name):
         return None
     dirs = get_profile_dirs(profile_name)
@@ -335,6 +293,7 @@ def get_frame_image_bytes(profile_name, frame_name):
 
 
 def get_reference_image_bytes(profile_name, ref_name):
+    """Load reference image bytes from disk."""
     if not _is_valid_asset_name(ref_name):
         return None
     dirs = get_profile_dirs(profile_name)
@@ -343,32 +302,22 @@ def get_reference_image_bytes(profile_name, ref_name):
 
 
 def get_debug_image_bytes(profile_name, debug_name, allow_fallback=False):
+    """Load debug image bytes from global debug directory."""
     if not _is_valid_asset_name(debug_name):
         return None
     if not _is_supported_debug_name(debug_name):
         return None
-    debug_dir, _ = get_debug_dir(profile_name, allow_fallback=allow_fallback)
-    if not debug_dir:
-        return None
-    debug_path = _safe_realpath(debug_dir, debug_name)
+    debug_path = _safe_realpath(get_debug_dir(), debug_name)
     return _load_image_bytes(debug_path)
 
 
 def get_profile_icon_bytes(profile_name):
+    """Load profile icon image bytes."""
     dirs = get_profile_dirs(profile_name)
-    meta_path = dirs["meta"]
     candidates = []
-
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r") as f:
-                data = json.load(f)
-            icon_name = data.get("icon")
-            if icon_name and _is_valid_asset_name(icon_name):
-                candidates.append(icon_name)
-        except Exception:
-            pass
-
+    record = storage.get_profile(profile_name)
+    if record and record.icon_path and _is_valid_asset_name(record.icon_path):
+        candidates.append(record.icon_path)
     candidates.extend(["icon.png", "icon.jpg", "icon.jpeg"])
     for name in candidates:
         icon_path = _safe_realpath(dirs["root"], name)
@@ -379,6 +328,7 @@ def get_profile_icon_bytes(profile_name):
 
 
 def set_profile_icon(profile_name, source_path):
+    """Copy and register a profile icon image."""
     valid, message = validate_profile_name(profile_name)
     if not valid:
         return False, message
@@ -396,37 +346,16 @@ def set_profile_icon(profile_name, source_path):
     if not dest_path:
         return False, "Invalid icon path."
 
-    meta_path = dirs["meta"]
-    data = {"name": profile_name}
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r") as f:
-                data.update(json.load(f) or {})
-        except Exception:
-            pass
-
-    old_icon = data.get("icon")
-    if old_icon and _is_valid_asset_name(old_icon):
-        old_path = _safe_realpath(dirs["root"], old_icon)
-        if (
-            old_path
-            and os.path.isfile(old_path)
-            and os.path.abspath(old_path) != os.path.abspath(dest_path)
-        ):
-            os.remove(old_path)
-
     os.makedirs(dirs["root"], exist_ok=True)
     shutil.copy2(source_path, dest_path)
-    data["icon"] = dest_name
-
-    with open(meta_path, "w") as f:
-        json.dump(data, f, indent=2)
+    storage.update_profile_fields(profile_name, icon_path=dest_name)
 
     print(f"Profile icon set for '{profile_name}': {dest_name}")
     return True, f"Profile icon set for '{profile_name}'."
 
 
 def import_frames(profile_name, file_paths):
+    """Import external images into profile frames directory."""
     dirs = get_profile_dirs(profile_name)
     frames_dir = dirs["frames"]
     added = 0
@@ -437,11 +366,13 @@ def import_frames(profile_name, file_paths):
         dst = os.path.join(frames_dir, name)
         if not os.path.exists(dst):
             shutil.copy2(src, dst)
+            storage.add_frame(profile_name, name, dst)
             added += 1
     return added
 
 
 def delete_reference_files(profile_name, ref_name):
+    """Delete reference image file and metadata."""
     if not _is_valid_asset_name(ref_name):
         return False, "Invalid reference name."
     dirs = get_profile_dirs(profile_name)
@@ -451,15 +382,12 @@ def delete_reference_files(profile_name, ref_name):
         return False, "Reference not found."
     if os.path.isfile(ref_path):
         os.remove(ref_path)
-
-    meta_name = f"{os.path.splitext(ref_name)[0]}.json"
-    meta_path = _safe_realpath(ref_dir, meta_name)
-    if meta_path and os.path.exists(meta_path) and os.path.isfile(meta_path):
-        os.remove(meta_path)
+    storage.delete_reference(profile_name, ref_name)
     return True, f"Reference '{ref_name}' deleted."
 
 
 def delete_frame_and_references(profile_name, frame_name):
+    """Delete a frame and any references derived from it."""
     if not _is_valid_asset_name(frame_name):
         return False, "Invalid frame name.", []
     dirs = get_profile_dirs(profile_name)
@@ -469,6 +397,7 @@ def delete_frame_and_references(profile_name, frame_name):
         return False, "Frame not found.", []
     if os.path.isfile(frame_path):
         os.remove(frame_path)
+    storage.delete_frame(profile_name, frame_name)
 
     deleted_refs = []
     for ref_name in list_references(profile_name):
@@ -494,10 +423,7 @@ def delete_debug_frame(profile_name, debug_name, allow_fallback=False):
         return False, 0
     if not _is_supported_debug_name(debug_name):
         return False, 0
-    debug_dir, _ = get_debug_dir(profile_name, allow_fallback=allow_fallback)
-    if not debug_dir:
-        return False, 0
-    debug_path = _safe_realpath(debug_dir, debug_name)
+    debug_path = _safe_realpath(get_debug_dir(), debug_name)
     if not debug_path or not os.path.exists(debug_path):
         return False, 0
     if os.path.isfile(debug_path):
@@ -506,29 +432,28 @@ def delete_debug_frame(profile_name, debug_name, allow_fallback=False):
         except Exception:
             bytes_freed = 0
         os.remove(debug_path)
+        entries = storage.list_debug_entries(profile_name if not allow_fallback else None)
+        for entry in entries:
+            if os.path.basename(entry["path"]) == debug_name:
+                storage.delete_debug_entries([entry["id"]])
+                break
         return True, bytes_freed
     return False, 0
 
 
 def delete_all_debug_frames(profile_name, allow_fallback=False):
     """Delete all debug frames. Returns (deleted_count, bytes_freed)."""
-    debug_dir, _ = get_debug_dir(profile_name, allow_fallback=allow_fallback)
+    entries = storage.list_debug_entries(profile_name if not allow_fallback else None)
     deleted = 0
     bytes_freed = 0
-    if not debug_dir or not os.path.isdir(debug_dir):
-        return deleted, bytes_freed
-    for name in os.listdir(debug_dir):
-        if not _is_supported_debug_name(name):
-            continue
-        path = os.path.join(debug_dir, name)
-        if (
-            os.path.isfile(path)
-            and os.path.abspath(path).startswith(os.path.abspath(debug_dir))
-        ):
+    for entry in entries:
+        path = entry["path"]
+        if os.path.isfile(path):
             try:
                 bytes_freed += os.path.getsize(path)
             except Exception:
                 pass
             os.remove(path)
             deleted += 1
+    storage.delete_debug_entries([entry["id"] for entry in entries])
     return deleted, bytes_freed

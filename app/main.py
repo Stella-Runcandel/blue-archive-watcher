@@ -1,3 +1,4 @@
+"""Application entrypoint for Frame Trace."""
 import sys
 from pathlib import Path
 
@@ -6,6 +7,7 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 from app.ui.app_shell import AppShell
+from core.logging_setup import setup_logging
 
 
 LIGHT_THEME_STYLESHEET = """
@@ -86,6 +88,7 @@ QScrollArea > QWidget > QWidget {
 
 
 def main():
+    setup_logging()
     QCoreApplication.setOrganizationName("Frame Trace")
     QCoreApplication.setApplicationName("Frame Trace")
     app = QApplication(sys.argv)

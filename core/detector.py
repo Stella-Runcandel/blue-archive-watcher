@@ -3,36 +3,25 @@
 Uses OpenCV edge-based template matching to detect user-defined references
 in camera frames. Detection flow: grayscale -> Canny edges -> matchTemplate
 with TM_CCOEFF_NORMED. Debug images are written on detection events, with
-a 1 GB storage limit and accounting for manual deletions via notify_debug_storage_freed.
+global bounded storage enforcement.
 """
 import cv2
 import logging
 import os
-import threading
 import time
 from dataclasses import dataclass
 from core.profiles import (
-    BASE_DIR,
     DEBUG_EXTENSIONS,
-    DEBUG_FALLBACK_DIR,
     get_profile_dirs,
     get_debug_dir,
     profile_path,
     get_detection_threshold,
 )
+from core import storage
 
 EXIT_TIMEOUT = 0.6  # seconds dialogue must disappear to reset
 DEBUG_STORAGE_LIMIT_BYTES = 1_073_741_824  # 1 GB
-
-_debug_storage_freed_bytes = 0
-_debug_storage_lock = threading.Lock()
-
-
-def notify_debug_storage_freed(bytes_freed: int):
-    """Notify the detector that debug images were deleted. Updates in-memory accounting."""
-    global _debug_storage_freed_bytes
-    with _debug_storage_lock:
-        _debug_storage_freed_bytes += bytes_freed
+DEBUG_STORAGE_LIMIT_COUNT = 2000
 
 
 # =========================
@@ -50,45 +39,39 @@ class DetectorState:
     total_debug_storage_bytes: int = 0
 
 
+@dataclass(frozen=True)
+class DetectionResult:
+    matched: bool
+    confidence: float
+    reference: str | None
+    timestamp: float
+
+
 # =========================
 # Debug storage accounting
 # =========================
 
-def _iter_all_debug_dirs_for_initialization():
-    if os.path.isdir(BASE_DIR):
-        for profile_name in os.listdir(BASE_DIR):
-            profile_dir = profile_path(profile_name)
-            if not os.path.isdir(profile_dir):
-                continue
-            debug_dir = os.path.join(profile_dir, "debug")
-            if os.path.isdir(debug_dir):
-                yield debug_dir
-
-    if os.path.isdir(DEBUG_FALLBACK_DIR):
-        yield DEBUG_FALLBACK_DIR
-
-
 def _compute_initial_debug_storage_bytes():
+    debug_dir = get_debug_dir()
     total = 0
-    for debug_dir in _iter_all_debug_dirs_for_initialization():
+    try:
+        names = os.listdir(debug_dir)
+    except Exception:
+        return 0
+    for name in names:
+        if not name.lower().endswith(DEBUG_EXTENSIONS):
+            continue
+        path = os.path.join(debug_dir, name)
         try:
-            names = os.listdir(debug_dir)
+            if os.path.isfile(path):
+                total += os.path.getsize(path)
         except Exception:
             continue
-
-        for name in names:
-            if not name.lower().endswith(DEBUG_EXTENSIONS):
-                continue
-            path = os.path.join(debug_dir, name)
-            try:
-                if os.path.isfile(path):
-                    total += os.path.getsize(path)
-            except Exception:
-                continue
     return total
 
 
 def initialize_debug_storage_tracking(state: DetectorState):
+    """Initialize debug storage accounting at startup."""
     try:
         state.total_debug_storage_bytes = _compute_initial_debug_storage_bytes()
     except Exception:
@@ -100,6 +83,7 @@ def initialize_debug_storage_tracking(state: DetectorState):
 
 
 def _emit_debug_limit_warning_once(state: DetectorState):
+    """Emit a warning once when debug storage bounds are exceeded."""
     if state.debug_limit_warning_emitted:
         return
     logging.warning(
@@ -109,14 +93,9 @@ def _emit_debug_limit_warning_once(state: DetectorState):
     state.debug_limit_warning_emitted = True
 
 
-def _save_debug_image_if_allowed(debug_dir, debug_image, state: DetectorState):
+def _save_debug_image_if_allowed(debug_dir, debug_image, state: DetectorState, profile_name: str, reference_name: str):
+    """Persist debug image and enforce global bounds."""
     try:
-        with _debug_storage_lock:
-            effective_used = state.total_debug_storage_bytes - _debug_storage_freed_bytes
-        if effective_used >= DEBUG_STORAGE_LIMIT_BYTES:
-            _emit_debug_limit_warning_once(state)
-            return
-
         state.debug_counter += 1
         debug_path = os.path.join(
             debug_dir,
@@ -128,12 +107,16 @@ def _save_debug_image_if_allowed(debug_dir, debug_image, state: DetectorState):
             return
 
         try:
-            state.total_debug_storage_bytes += os.path.getsize(debug_path)
+            size_bytes = os.path.getsize(debug_path)
         except Exception:
-            logging.warning(
-                "Failed to read debug image size; continuing monitoring.",
-                exc_info=True,
-            )
+            size_bytes = 0
+        storage.add_debug_entry(profile_name, reference_name, debug_path, size_bytes)
+        for path in storage.prune_debug_entries(DEBUG_STORAGE_LIMIT_BYTES, DEBUG_STORAGE_LIMIT_COUNT):
+            try:
+                os.remove(path)
+            except Exception:
+                logging.warning("Failed to prune debug image %s", path, exc_info=True)
+        state.total_debug_storage_bytes = _compute_initial_debug_storage_bytes()
 
         state.last_debug_frame = debug_image
 
@@ -149,6 +132,7 @@ def _save_debug_image_if_allowed(debug_dir, debug_image, state: DetectorState):
 # =========================
 
 def new_detector_state():
+    """Create a new detector state instance."""
     state = DetectorState()
     initialize_debug_storage_tracking(state)
     return state
@@ -207,6 +191,7 @@ def reference_selector(profile_name):
     ref_path = os.path.join(ref_dir, f"ref_{len(existing) + 1}.png")
 
     cv2.imwrite(ref_path, crop)
+    storage.add_reference(profile_name, os.path.basename(ref_path), ref_path, base_frames[0])
     cv2.destroyAllWindows()
     return True, f"Reference saved as {os.path.basename(ref_path)}"
 
@@ -215,7 +200,8 @@ def reference_selector(profile_name):
 # Detection core
 # =========================
 
-def _detect_from_gray(profile_name, frame_gray, selected_reference: str | None = None):
+def _find_best_match(profile_name, frame_gray, selected_reference: str | None = None):
+    """Return best matching reference and confidence score for a frame."""
     frame_e = cv2.Canny(frame_gray, 80, 160)
     references_dir = get_profile_dirs(profile_name)["references"]
 
@@ -224,6 +210,9 @@ def _detect_from_gray(profile_name, frame_gray, selected_reference: str | None =
         if selected_reference
         else [f for f in os.listdir(references_dir) if f.lower().endswith(".png")]
     )
+    best_ref = None
+    best_bbox = None
+    best_score = 0.0
     for ref in refs_to_check:
         if not ref.lower().endswith(".png"):
             continue
@@ -239,27 +228,26 @@ def _detect_from_gray(profile_name, frame_gray, selected_reference: str | None =
             continue
         result = cv2.matchTemplate(frame_e, template_e, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        if max_val > best_score:
+            x, y = max_loc
+            h, w = template_e.shape[:2]
+            GRID = 8
+            x = (x // GRID) * GRID
+            y = (y // GRID) * GRID
+            best_ref = ref
+            best_bbox = (x, y, w, h)
+            best_score = max_val
 
-        if max_val < get_detection_threshold(profile_name):
-            continue
+    if best_ref and best_score >= get_detection_threshold(profile_name):
+        return best_ref, best_bbox, best_score
 
-        x, y = max_loc
-        h, w = template_e.shape[:2]
-
-        GRID = 8
-        x = (x // GRID) * GRID
-        y = (y // GRID) * GRID
-
-        return ref, (x, y, w, h)
-
-    return None, None
+    return None, None, best_score
 
 
-def frame_comp_from_array(profile_name, frame, state: DetectorState, selected_reference: str | None = None):
-    """Run detection on an in-memory frame. When selected_reference is set, only that reference
-    is matched; otherwise all references are checked. Returns True if a match is found."""
+def evaluate_frame(profile_name, frame, state: DetectorState, selected_reference: str | None = None):
+    """Evaluate a frame deterministically and return match metadata."""
     if not profile_name or frame is None:
-        return False
+        return DetectionResult(False, 0.0, None, time.time())
 
     profile_valid = os.path.isdir(profile_path(profile_name))
 
@@ -269,7 +257,11 @@ def frame_comp_from_array(profile_name, frame, state: DetectorState, selected_re
     )
 
     now = time.time()
-    matched_ref, match_bbox = _detect_from_gray(profile_name, frame_gray, selected_reference)
+    matched_ref, match_bbox, confidence = _find_best_match(
+        profile_name,
+        frame_gray,
+        selected_reference,
+    )
 
     if matched_ref is not None:
         state.last_seen_time = now
@@ -281,28 +273,36 @@ def frame_comp_from_array(profile_name, frame, state: DetectorState, selected_re
         if state.active_dialogue != matched_ref:
             state.active_dialogue = matched_ref
 
-        # One debug image per detection event
         if event_start:
             debug = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
             x, y, w, h = match_bbox
             cv2.rectangle(debug, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-            debug_dir, _ = get_debug_dir(
-                profile_name if profile_valid else None,
-                allow_fallback=True
-            )
+            debug_dir = get_debug_dir()
             if debug_dir:
-                _save_debug_image_if_allowed(debug_dir, debug, state)
+                _save_debug_image_if_allowed(
+                    debug_dir,
+                    debug,
+                    state,
+                    profile_name if profile_valid else None,
+                    matched_ref,
+                )
 
-        return True
+        return DetectionResult(True, float(confidence), matched_ref, now)
 
-    # Event exit
     if state.active_dialogue and now - state.last_seen_time > EXIT_TIMEOUT:
         state.active_dialogue = None
         state.event_active = False
         state.last_debug_frame = None
 
-    return False
+    return DetectionResult(False, float(confidence), None, now)
+
+
+def frame_comp_from_array(profile_name, frame, state: DetectorState, selected_reference: str | None = None):
+    """Run detection on an in-memory frame. When selected_reference is set, only that reference
+    is matched; otherwise all references are checked. Returns True if a match is found."""
+    result = evaluate_frame(profile_name, frame, state, selected_reference=selected_reference)
+    return result.matched
 
 
 def frame_comp(profile_name, state=None):
