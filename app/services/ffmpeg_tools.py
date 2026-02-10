@@ -50,6 +50,14 @@ def _run_ffmpeg_command(args, timeout=10, text=True):
 
 def list_dshow_video_devices():
     """Return DirectShow video device names using FFmpeg enumeration."""
+    return list_video_devices()
+
+
+def list_video_devices() -> list[str]:
+    """
+    Return a list of video capture device names discovered via FFmpeg (Windows).
+    Must be safe, fail gracefully, and return [] on error.
+    """
     ffmpeg_path = resolve_ffmpeg_path()
     args = [
         ffmpeg_path,
@@ -61,9 +69,13 @@ def list_dshow_video_devices():
         "-i",
         "dummy",
     ]
-    result = _run_ffmpeg_command(args, timeout=10, text=True)
-    output = result.stderr or ""
-    return _parse_dshow_video_devices(output)
+    try:
+        # FFmpeg writes DirectShow device listings to stderr for this command.
+        result = _run_ffmpeg_command(args, timeout=10, text=True)
+        output = result.stderr or ""
+        return _parse_dshow_video_devices(output)
+    except Exception:
+        return []
 
 
 def _parse_dshow_video_devices(output: str):
