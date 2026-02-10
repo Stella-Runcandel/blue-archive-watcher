@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -164,43 +165,54 @@ class DashboardPanel(QWidget):
             """
         )
 
-        layout = QVBoxLayout()
+        content_layout = QVBoxLayout()
         profile_row = QHBoxLayout()
         profile_row.addWidget(self.profile_label)
         profile_row.addStretch(1)
-        layout.addLayout(profile_row)
+        content_layout.addLayout(profile_row)
 
         strictness_row = QHBoxLayout()
         strictness_row.addWidget(self.strictness_label)
         strictness_row.addWidget(self.strictness_combo)
-        layout.addLayout(strictness_row)
+        content_layout.addLayout(strictness_row)
 
         fps_row = QHBoxLayout()
         fps_row.addWidget(self.fps_label)
         fps_row.addWidget(self.fps_spinbox)
-        layout.addLayout(fps_row)
+        content_layout.addLayout(fps_row)
 
         camera_row = QHBoxLayout()
         camera_row.addWidget(self.camera_label)
         camera_row.addWidget(self.camera_combo)
         camera_row.addWidget(self.camera_refresh_btn)
-        layout.addLayout(camera_row)
+        content_layout.addLayout(camera_row)
 
-        layout.addWidget(self.frame_label)
-        layout.addWidget(self.ref_label)
-        layout.addWidget(self.camera_preview_title)
-        layout.addWidget(self.camera_preview_hint)
-        layout.addWidget(self.camera_preview)
-        layout.addWidget(self.profile_preview)
-        layout.addWidget(self.monitor_label)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.capture_fps_label)
-        layout.addWidget(self.process_fps_label)
-        layout.addWidget(self.dropped_label)
-        layout.addWidget(self.queue_label)
-        layout.addWidget(self.last_detection_label)
-        layout.addWidget(self.start_btn)
-        layout.addWidget(self.stop_btn)
+        content_layout.addWidget(self.frame_label)
+        content_layout.addWidget(self.ref_label)
+        content_layout.addWidget(self.camera_preview_title)
+        content_layout.addWidget(self.camera_preview_hint)
+        content_layout.addWidget(self.camera_preview)
+        content_layout.addWidget(self.profile_preview)
+        content_layout.addWidget(self.monitor_label)
+        content_layout.addWidget(self.status_label)
+        content_layout.addWidget(self.capture_fps_label)
+        content_layout.addWidget(self.process_fps_label)
+        content_layout.addWidget(self.dropped_label)
+        content_layout.addWidget(self.queue_label)
+        content_layout.addWidget(self.last_detection_label)
+        content_layout.addWidget(self.start_btn)
+        content_layout.addWidget(self.stop_btn)
+        content_layout.addStretch(1)
+
+        content = QWidget()
+        content.setLayout(content_layout)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+
+        layout = QVBoxLayout()
+        layout.addWidget(scroll)
         self.setLayout(layout)
 
         self.monitor = MonitorService()

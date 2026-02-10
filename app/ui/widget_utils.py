@@ -19,18 +19,17 @@ def make_preview_label(
     min_height: int = 220,
     object_name: str = "preview_label",
 ) -> QLabel:
-    """Create a configured preview label with fixed-size preview behavior."""
+    """Create a configured preview label with resizable preview behavior."""
     label = QLabel(text)
     label.setObjectName(object_name)
 
     label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     label.setMinimumHeight(min_height)
-    label.setMaximumHeight(min_height)
 
     label.setScaledContents(False)
     label.setSizePolicy(
         QSizePolicy.Policy.Expanding,
-        QSizePolicy.Policy.Fixed,
+        QSizePolicy.Policy.Expanding,
     )
 
     label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)

@@ -197,6 +197,31 @@ def list_frames(profile_name: str) -> list[str]:
     return [row["name"] for row in rows]
 
 
+def list_frame_entries(profile_name: str) -> list[sqlite3.Row]:
+    """List frame rows (name, path) for a profile."""
+    profile = get_profile(profile_name)
+    if not profile:
+        return []
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT name, path FROM frames WHERE profile_id = ? ORDER BY LOWER(name)",
+            (profile.id,),
+        ).fetchall()
+    return rows
+
+
+def update_frame_path(profile_name: str, name: str, path: str) -> None:
+    """Update the stored path for a frame."""
+    profile = get_profile(profile_name)
+    if not profile:
+        return
+    with connect() as conn:
+        conn.execute(
+            "UPDATE frames SET path = ? WHERE profile_id = ? AND name = ?",
+            (path, profile.id, name),
+        )
+
+
 def delete_frame(profile_name: str, name: str) -> None:
     """Delete a frame metadata row."""
     profile = get_profile(profile_name)
@@ -232,6 +257,31 @@ def list_references(profile_name: str) -> list[str]:
             (profile.id,),
         ).fetchall()
     return [row["name"] for row in rows]
+
+
+def list_reference_entries(profile_name: str) -> list[sqlite3.Row]:
+    """List reference rows (name, path) for a profile."""
+    profile = get_profile(profile_name)
+    if not profile:
+        return []
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT name, path FROM reference_entries WHERE profile_id = ? ORDER BY LOWER(name)",
+            (profile.id,),
+        ).fetchall()
+    return rows
+
+
+def update_reference_path(profile_name: str, name: str, path: str) -> None:
+    """Update the stored path for a reference."""
+    profile = get_profile(profile_name)
+    if not profile:
+        return
+    with connect() as conn:
+        conn.execute(
+            "UPDATE reference_entries SET path = ? WHERE profile_id = ? AND name = ?",
+            (path, profile.id, name),
+        )
 
 
 def delete_reference(profile_name: str, name: str) -> None:
