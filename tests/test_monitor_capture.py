@@ -1,14 +1,14 @@
 """Tests for global FFmpeg capture lifecycle behavior."""
+import unittest
 import subprocess
 import sys
-import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from app.services.ffmpeg_tools import CaptureConfig
 
 
 def _module_importable(module: str) -> bool:
-    """Return True when module can be imported in a subprocess."""
     result = subprocess.run(
         [sys.executable, "-c", f"import {module}"],
         stdout=subprocess.DEVNULL,
@@ -19,7 +19,6 @@ def _module_importable(module: str) -> bool:
 
 
 CV2_AVAILABLE = _module_importable("cv2")
-
 
 class DummyProcess:
     def poll(self):
@@ -48,6 +47,16 @@ class DummyCapture:
 
     def is_alive(self):
         return True
+
+
+class FailingCapture(DummyCapture):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._alive = False
+        self.last_error = "device busy"
+
+    def is_alive(self):
+        return self._alive
 
 
 def _reset_globals(monitor_service):
@@ -110,6 +119,8 @@ class MonitorCaptureTests(unittest.TestCase):
         service = self.monitor_service.MonitorService()
         service._capture = DummyCapture("camera-1", CaptureConfig(1, 1, 1), None)
         service._capture_acquired = True
+        service._state.request_start()
+        service._state.mark_running()
 
         with mock.patch.object(self.monitor_service, "_release_global_capture") as release_mock:
             service.stop()
@@ -119,8 +130,8 @@ class MonitorCaptureTests(unittest.TestCase):
     def test_get_latest_global_frame_does_not_drain_queue(self):
         """Global preview accessor should read latest frame without removing queued frames."""
         queue = self.monitor_service.FrameQueue(maxlen=4)
-        queue.put((1.0, b"a"))
-        queue.put((2.0, b"b"))
+        queue.put(self.monitor_service.FramePacket(1.0, b"a"))
+        queue.put(self.monitor_service.FramePacket(2.0, b"b"))
         self.monitor_service._GLOBAL_QUEUE = queue
         latest = self.monitor_service.get_latest_global_frame()
         self.assertEqual(latest, (2.0, b"b"))
@@ -152,3 +163,44 @@ class MonitorCaptureTests(unittest.TestCase):
             ok, reason = self.monitor_service._ensure_preview_capture("camera-1", config, allow_input_tuning=False)
             self.assertFalse(ok)
             self.assertEqual(reason, "Preview paused while monitoring is active")
+
+    def _fail_capture_once(self, input_token, config, *, allow_input_tuning):
+        queue = self.monitor_service.FrameQueue(maxlen=2)
+        cap = FailingCapture(input_token, config, queue, allow_input_tuning=allow_input_tuning)
+        return cap, queue
+
+    def test_monitoring_retries_limited_and_reports_failure(self):
+        service = self.monitor_service.MonitorService()
+        messages = []
+        states = []
+        service.status.connect(messages.append)
+        service.state_changed.connect(states.append)
+
+        with (
+            mock.patch.object(self.monitor_service, "pause_preview_for_monitoring"),
+            mock.patch.object(self.monitor_service, "resume_preview_after_monitoring"),
+            mock.patch.object(self.monitor_service, "get_profile_dirs"),
+            mock.patch.object(self.monitor_service, "get_profile_camera_device", return_value="cam-a"),
+            mock.patch.object(self.monitor_service, "get_profile_frame_size", return_value=(640, 480)),
+            mock.patch.object(self.monitor_service, "get_profile_fps", return_value=30),
+            mock.patch.object(self.monitor_service, "build_capture_input_candidates", return_value=[SimpleNamespace(token="video=cam-a", is_virtual=True)]),
+            mock.patch.object(self.monitor_service, "_ensure_global_capture", side_effect=self._fail_capture_once),
+            mock.patch.object(self.monitor_service, "_release_global_capture") as release_mock,
+            mock.patch.object(self.monitor_service.time, "sleep", return_value=None),
+            mock.patch.object(self.monitor_service.time, "time", side_effect=[0.0, 3.0, 4.0, 7.0, 8.0, 11.0, 12.0]),
+        ):
+            from app.app_state import app_state
+
+            app_state.active_profile = "alpha"
+            app_state.selected_reference = "ref"
+            service.run()
+
+        retry_msgs = [m for m in messages if "Monitoring retrying" in m]
+        self.assertEqual(len(retry_msgs), 2)
+        self.assertTrue(any(m.startswith("Monitoring failed:") for m in messages))
+        self.assertIn("FAILED", states)
+        self.assertGreaterEqual(release_mock.call_count, 3)
+
+
+if __name__ == "__main__":
+    unittest.main()

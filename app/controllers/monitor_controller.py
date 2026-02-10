@@ -14,9 +14,8 @@ class MonitorController:
         if self.monitor.isRunning():
             return "Already monitoring"
 
-        app_state.monitoring_active = True
         self.monitor.start()
-        return "Monitoring started"
+        return "Monitoring start requested"
 
     def stop(self):
         if not self.monitor.isRunning():
@@ -26,4 +25,4 @@ class MonitorController:
         if not self.monitor.wait(5000):
             logging.warning("Monitor thread did not exit within 5 seconds")
         app_state.monitoring_active = False
-        return "Monitoring stopped"
+        return "Monitoring stop requested"

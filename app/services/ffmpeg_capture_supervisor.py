@@ -111,7 +111,13 @@ class FfmpegCaptureSupervisor:
             self.log_events.put_nowait(event)
         except queue.Full:
             pass
-        getattr(logging, level.value.lower())("FFmpeg %s", message)
+        getattr(logging, level.value.lower())(
+            "[CAM_CAPTURE] id=%s pipeline=%s camera=%r %s",
+            self.instance_id,
+            self.pipeline,
+            self.input_token,
+            message,
+        )
 
     @staticmethod
     def _classify_log(text: str) -> LogLevel:

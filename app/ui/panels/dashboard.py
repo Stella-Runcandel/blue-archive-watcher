@@ -217,6 +217,7 @@ class DashboardPanel(QWidget):
         self.monitor = MonitorService()
         self.monitor.status.connect(self.status_label.setText)
         self.monitor.metrics.connect(self.on_metrics_update)
+        self.monitor.state_changed.connect(self.on_monitor_state_changed)
         self.monitor_controller = MonitorController(self.monitor)
 
         self.start_btn.clicked.connect(self.start)
@@ -267,16 +268,16 @@ class DashboardPanel(QWidget):
         self._frozen_frame = None
         pause_preview_for_monitoring()
         self.refresh_camera_devices()
-        self.monitor_controller.start()
-        self.status_label.setText(f"Monitoring started ({app_state.selected_reference})")
+        result = self.monitor_controller.start()
+        self.status_label.setText(result)
         self.refresh()
 
     def stop(self):
         if not app_state.monitoring_active:
             self.status_label.setText("Monitoring is not running")
             return
-        self.monitor_controller.stop()
-        self.status_label.setText("Monitoring stopped")
+        result = self.monitor_controller.stop()
+        self.status_label.setText(result)
         self.refresh()
 
     def freeze_frame(self):
@@ -441,6 +442,23 @@ class DashboardPanel(QWidget):
             )
         )
         self.profile_preview.setText("")
+
+
+    def on_monitor_state_changed(self, state):
+        running = state == "RUNNING"
+        app_state.monitoring_active = running
+        if running:
+            self.monitor_label.setText(f"Monitoring: Running ({app_state.selected_reference})")
+        elif state == "STARTING":
+            self.monitor_label.setText("Monitoring: Starting")
+        elif state == "STOPPING":
+            self.monitor_label.setText("Monitoring: Stopping")
+        elif state == "FAILED":
+            self.monitor_label.setText("Monitoring: Failed")
+        else:
+            self.monitor_label.setText("Monitoring: Stopped")
+        self.start_btn.setEnabled(app_state.selected_reference is not None and not self.monitor.isRunning())
+        self.stop_btn.setEnabled(self.monitor.isRunning())
 
     def on_metrics_update(self, payload):
         capture_fps = payload.get("capture_fps", 0.0)

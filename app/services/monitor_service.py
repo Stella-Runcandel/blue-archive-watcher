@@ -14,7 +14,6 @@ from app.services.ffmpeg_tools import (
     CaptureConfig,
     FfmpegNotFoundError,
     build_capture_input_candidates,
-    list_camera_devices,
 )
 from app.services.frame_bus import FrameQueue
 from app.services.frame_consumers import DetectionConsumer, MetricsConsumer, SnapshotConsumer
@@ -292,9 +291,7 @@ class MonitorService(QThread):
                 failed = True
                 return
 
-            enumerated_names = [d.display_name for d in list_camera_devices(force_refresh=True)]
-            logging.info("[CAM_CAPTURE] selected camera=%r available=%s", selected_display_name, enumerated_names)
-            input_candidates = build_capture_input_candidates(selected_display_name)
+            input_candidates = build_capture_input_candidates(selected_display_name, force_refresh=True)
             if not input_candidates:
                 set_profile_camera_device(profile, "")
                 self.status.emit(f"Monitoring failed: camera not found ({selected_display_name})")
@@ -319,6 +316,8 @@ class MonitorService(QThread):
                 config = configs[min(attempt - 1, len(configs) - 1)]
                 if attempt > 1:
                     self.status.emit(f"Monitoring retrying ({attempt}/{max_retries})")
+                    if self._stop_event.wait(0.3):
+                        break
                 logging.info("[CAM_CAPTURE] start attempt=%s/%s camera=%r config=%s", attempt, max_retries, candidate.token, config.label)
 
                 cap, queue = _ensure_global_capture(
@@ -373,6 +372,10 @@ class MonitorService(QThread):
 
             if self._stop_event.is_set():
                 return
+
+            if self._processing_thread and self._processing_thread.is_alive():
+                self._processing_thread.join(timeout=2)
+            self._processing_thread = None
 
             if not self.running:
                 self.status.emit(f"Monitoring failed: {failure_reason}")
@@ -471,6 +474,7 @@ class MonitorService(QThread):
         self._stop_event.set()
         if self._processing_thread and self._processing_thread.is_alive():
             self._processing_thread.join(timeout=5)
+        self._processing_thread = None
 
         if self._capture and self._capture_acquired:
             _release_global_capture(clear_queue=clear_queue)
