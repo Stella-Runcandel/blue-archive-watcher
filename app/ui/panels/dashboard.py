@@ -1,4 +1,5 @@
 """Dashboard panel showing monitoring controls and live metrics."""
+import logging
 import time
 
 import numpy as np
@@ -365,6 +366,7 @@ class DashboardPanel(QWidget):
             return
 
         current_device = get_profile_camera_device(profile)
+        logging.info("[CAM_UI] combo refresh profile=%r stored value=%r cached devices=%s", profile, current_device, self._cached_available_camera_devices)
         devices = list(self._cached_available_camera_devices or [])
         if current_device and current_device not in devices:
             devices.append(current_device)
@@ -378,6 +380,7 @@ class DashboardPanel(QWidget):
             for device in unique_devices:
                 self.camera_combo.addItem(str(device), device)
             selected = self.camera_combo.findData(current_device)
+            logging.info("[CAM_UI] combo options=%s selected index=%s", unique_devices, selected)
             if selected >= 0:
                 self.camera_combo.setCurrentIndex(selected)
             self.camera_combo.setEnabled(True)
@@ -391,6 +394,8 @@ class DashboardPanel(QWidget):
         device_name = self.camera_combo.itemData(index)
         if device_name is None:
             return
+        display_text = self.camera_combo.itemText(index)
+        logging.info("[CAM_UI] camera changed index=%s display=%r stored=%r", index, display_text, device_name)
         set_profile_camera_device(app_state.active_profile, device_name)
 
     def update_profile_preview(self):
@@ -448,6 +453,7 @@ class DashboardPanel(QWidget):
 
     def refresh_camera_devices(self):
         self._cached_available_camera_devices = list_video_devices(force_refresh=True)
+        logging.info("[CAM_UI] refresh camera devices -> %s", self._cached_available_camera_devices)
         self.update_camera_devices()
 
     def update_camera_preview(self):

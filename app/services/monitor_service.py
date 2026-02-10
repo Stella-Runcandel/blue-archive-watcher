@@ -2,15 +2,22 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from app.app_state import app_state
 from app.services.ffmpeg_capture_supervisor import LogLevel
-from app.services.ffmpeg_tools import CaptureConfig, FfmpegNotFoundError
+from app.services.ffmpeg_tools import (
+    CaptureConfig,
+    FfmpegNotFoundError,
+    list_camera_devices,
+    resolve_camera_device_token,
+)
 from app.services.frame_bus import FrameQueue
 from app.services.frame_consumers import DetectionConsumer, MetricsConsumer, SnapshotConsumer
 from app.services.monitor_state_machine import InvalidTransition, MonitoringState, MonitoringStateMachine
@@ -23,6 +30,7 @@ from core.profiles import (
     get_profile_fps,
     get_profile_frame_size,
     get_profile_frame_size_fallback,
+    set_profile_camera_device,
 )
 
 _GLOBAL_LOCK = threading.Lock()
@@ -31,7 +39,21 @@ _GLOBAL_QUEUE: FrameQueue | None = None
 _GLOBAL_USERS = 0
 
 
-def _ensure_global_capture(device_name: str, config: CaptureConfig) -> tuple[FfmpegCapture, FrameQueue]:
+def _camera_debug_enabled() -> bool:
+    return os.environ.get("CAMERA_DEBUG", "").strip() in {"1", "true", "TRUE", "yes", "on"}
+
+
+def _camera_debug_dump(section: str, payload: str) -> None:
+    if not _camera_debug_enabled():
+        return
+    logs_dir = Path("Data") / "Logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    path = logs_dir / "camera_debug.log"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(f"[{section}]\n{payload}\n\n")
+
+
+def _ensure_global_capture(input_token: str, config: CaptureConfig) -> tuple[FfmpegCapture, FrameQueue]:
     global _GLOBAL_CAPTURE, _GLOBAL_QUEUE, _GLOBAL_USERS
     with _GLOBAL_LOCK:
         if _GLOBAL_CAPTURE and _GLOBAL_CAPTURE.is_alive():
@@ -39,7 +61,7 @@ def _ensure_global_capture(device_name: str, config: CaptureConfig) -> tuple[Ffm
             return _GLOBAL_CAPTURE, _GLOBAL_QUEUE
 
         _GLOBAL_QUEUE = FrameQueue(maxlen=8)
-        _GLOBAL_CAPTURE = FfmpegCapture(device_name=device_name, config=config, frame_queue=_GLOBAL_QUEUE)
+        _GLOBAL_CAPTURE = FfmpegCapture(input_token=input_token, config=config, frame_queue=_GLOBAL_QUEUE)
         _GLOBAL_CAPTURE.start()
         _GLOBAL_USERS = 1
         return _GLOBAL_CAPTURE, _GLOBAL_QUEUE
@@ -126,9 +148,31 @@ class MonitorService(QThread):
                 self._state.mark_failed()
                 return
 
-            device_name = get_profile_camera_device(profile)
-            if not device_name:
+            selected_display_name = get_profile_camera_device(profile)
+            if not selected_display_name:
                 self.status.emit("No camera selected")
+                self._state.mark_failed()
+                return
+
+            enumerated_devices = list_camera_devices(force_refresh=True)
+            enumerated_names = [d.display_name for d in enumerated_devices]
+            logging.info(
+                "[CAM_UI] profile=%r stored camera selection=%r available devices=%s",
+                profile,
+                selected_display_name,
+                enumerated_names,
+            )
+            _camera_debug_dump("CAMERA_SELECTION", f"profile={profile}\nstored={selected_display_name}\navailable={enumerated_names}")
+            input_token = resolve_camera_device_token(selected_display_name)
+            if not input_token:
+                logging.warning(
+                    "[CAM_CAPTURE] selected camera %r missing from current enumeration; invalidating profile field",
+                    selected_display_name,
+                )
+                set_profile_camera_device(profile, "")
+                summary = f"Capture blocked: stored camera {selected_display_name!r} is not in current FFmpeg enumeration."
+                _camera_debug_dump("FAIL_SUMMARY", summary)
+                self.status.emit(f"Camera not found: {selected_display_name}. Re-select camera and retry.")
                 self._state.mark_failed()
                 return
 
@@ -138,7 +182,8 @@ class MonitorService(QThread):
             fps = get_profile_fps(profile)
 
             config = CaptureConfig(width=width, height=height, fps=fps)
-            self._capture, queue = _ensure_global_capture(device_name, config)
+            logging.info("[CAM_CAPTURE] selected display_name=%r resolved input token=%r", selected_display_name, input_token)
+            self._capture, queue = _ensure_global_capture(input_token, config)
             self._capture_acquired = True
 
             self._state.mark_running()
@@ -157,6 +202,7 @@ class MonitorService(QThread):
             while not self._stop_event.is_set():
                 if self._capture and not self._capture.is_alive():
                     self.status.emit("FFmpeg exited unexpectedly")
+                    _camera_debug_dump("FAIL_SUMMARY", "Capture failed: FFmpeg process exited unexpectedly. Check CAM_CAPTURE stderr lines above.")
                     self._state.mark_failed()
                     break
                 self._drain_ffmpeg_logs()
@@ -181,6 +227,7 @@ class MonitorService(QThread):
             event = self._capture.log_events.get_nowait()
             if event.level == LogLevel.ERROR:
                 self.status.emit(f"FFmpeg error: {event.message}")
+                _camera_debug_dump("FFMPEG_STDERR", event.message)
 
     def _processing_loop(self, profile, queue: FrameQueue, width: int, height: int):
         processed = 0

@@ -26,8 +26,8 @@ class FfmpegLogEvent:
 
 
 class FfmpegCaptureSupervisor:
-    def __init__(self, device_name: str, config: CaptureConfig, frame_queue: FrameQueue):
-        self.device_name = device_name
+    def __init__(self, input_token: str, config: CaptureConfig, frame_queue: FrameQueue):
+        self.input_token = input_token
         self.config = config
         self.frame_queue = frame_queue
         self.process: subprocess.Popen | None = None
@@ -39,7 +39,8 @@ class FfmpegCaptureSupervisor:
         self.last_error: str | None = None
 
     def start(self) -> None:
-        cmd = build_ffmpeg_capture_command(self.device_name, self.config)
+        cmd = build_ffmpeg_capture_command(self.input_token, self.config)
+        logging.info("[CAM_CAPTURE] start ffmpeg with input token %r", self.input_token)
         try:
             self.process = subprocess.Popen(
                 cmd,
@@ -86,6 +87,7 @@ class FfmpegCaptureSupervisor:
                 continue
             level = self._classify_log(text)
             self._emit_log(level, text)
+            logging.info("[CAM_CAPTURE] ffmpeg stderr: %s", text)
             if level == LogLevel.ERROR:
                 self.last_error = text
 
@@ -128,6 +130,8 @@ class FfmpegCaptureSupervisor:
             self._reader_thread.join(timeout=timeout)
         if self._stderr_thread:
             self._stderr_thread.join(timeout=timeout)
+        if self.process:
+            logging.info("[CAM_CAPTURE] ffmpeg exit code: %s", self.process.returncode)
 
     def is_alive(self) -> bool:
         return bool(self.process and self.process.poll() is None)

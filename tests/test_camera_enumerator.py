@@ -53,3 +53,24 @@ Auto-detected sources for v4l2:
     @patch("app.services.camera_enumerator._run_ffmpeg", side_effect=RuntimeError("boom"))
     def test_enumerate_video_devices_fails_safe_to_empty(self, _run_mock, _platform_mock):
         self.assertEqual(camera_enumerator.enumerate_video_devices(), [])
+
+
+    def test_reject_invalid_windows_names(self):
+        items = ["OBS Virtual Camera", "Camera 0", "Camera1", "HD Webcam"]
+        self.assertEqual(
+            camera_enumerator._reject_invalid_windows_names(items),
+            ["OBS Virtual Camera", "HD Webcam"],
+        )
+
+    @patch("app.services.camera_enumerator.platform.system", return_value="Windows")
+    @patch("app.services.camera_enumerator._run_ffmpeg")
+    def test_enumerate_video_devices_returns_structured_objects(self, run_mock, _platform_mock):
+        run_mock.return_value = type("R", (), {
+            "stderr": '[dshow @ 1] DirectShow video devices\n[dshow @ 1] "OBS Virtual Camera"\n[dshow @ 1] DirectShow audio devices',
+            "stdout": "",
+            "returncode": 1,
+        })()
+        devices = camera_enumerator.enumerate_video_devices("ffmpeg")
+        self.assertEqual(len(devices), 1)
+        self.assertEqual(devices[0].display_name, "OBS Virtual Camera")
+        self.assertEqual(devices[0].ffmpeg_token, "video=OBS Virtual Camera")
