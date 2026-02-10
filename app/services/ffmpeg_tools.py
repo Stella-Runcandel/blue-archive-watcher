@@ -1,14 +1,13 @@
-"""FFmpeg discovery and command helpers for Windows capture."""
+"""FFmpeg discovery and command helpers for camera capture."""
 from __future__ import annotations
 
 import os
 import platform
-import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.services.mf_enumerator import enumerate_video_devices
+from app.services.camera_enumerator import enumerate_video_devices
 
 
 class FfmpegNotFoundError(RuntimeError):
@@ -50,51 +49,24 @@ def _run_ffmpeg_command(args, timeout=10, text=True):
         raise FfmpegNotFoundError("ffmpeg executable not found") from exc
 
 
-def _parse_dshow_video_devices(output: str):
-    devices = []
-    in_video = False
-    for line in output.splitlines():
-        if "DirectShow video devices" in line:
-            in_video = True
-            continue
-        if "DirectShow audio devices" in line:
-            in_video = False
-        if not in_video:
-            continue
-        match = re.search(r'"([^\"]+)"', line)
-        if match:
-            devices.append(match.group(1))
-    return devices
-
-
 def _probe_opencv_indices(*_args, **_kwargs):
     """Deprecated fallback kept for test compatibility; intentionally disabled."""
     return []
 
 
 def list_video_devices(force_refresh: bool = False) -> list[str]:
-    """List ffmpeg-compatible camera names from MF enumeration only."""
+    """List FFmpeg-compatible camera names using FFmpeg-only enumeration."""
     global _ENUM_CACHE
     if _ENUM_CACHE is not None and not force_refresh:
         return list(_ENUM_CACHE)
 
-    try:
-        devices = [d.ffmpeg_name for d in enumerate_video_devices()]
-    except Exception:
-        devices = []
+    ffmpeg_path = resolve_ffmpeg_path()
+    devices = enumerate_video_devices(ffmpeg_path=ffmpeg_path)
 
-    # Backward compatibility for older test harnesses: parse dshow listing only when
-    # MF cannot return values and caller explicitly runs on non-Windows stubs.
-    if not devices and platform.system() != "Windows":
-        try:
-            result = _run_ffmpeg_command(
-                [resolve_ffmpeg_path(), "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
-                timeout=10,
-                text=True,
-            )
-            devices = _parse_dshow_video_devices(result.stderr or "")
-        except Exception:
-            devices = []
+    # Non-Windows fallback: retry using `ffmpeg` from PATH in case a bundled
+    # Windows-only binary path is present but unsuitable on this platform.
+    if not devices and platform.system() != "Windows" and ffmpeg_path != "ffmpeg":
+        devices = enumerate_video_devices(ffmpeg_path="ffmpeg")
 
     _ENUM_CACHE = list(dict.fromkeys(devices))
     return list(_ENUM_CACHE)
