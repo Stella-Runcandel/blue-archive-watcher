@@ -46,6 +46,8 @@ def list_profiles():
     """Return profile names from SQLite, migrating filesystem directories if needed."""
     profiles = storage.list_profiles()
     if profiles:
+        for name in profiles:
+            migrate_profile_assets(name)
         return profiles
     if not os.path.exists(BASE_DIR):
         return []
@@ -58,6 +60,7 @@ def list_profiles():
             storage.create_profile(name)
         except Exception:
             continue
+        migrate_profile_assets(name)
     return sorted(discovered, key=str.lower)
 
 
@@ -76,6 +79,39 @@ def get_profile_dirs(profile_name):
         os.makedirs(path, exist_ok=True)
 
     return dirs
+
+
+def migrate_profile_assets(profile_name):
+    """Populate SQLite with filesystem-only frames/references and prune missing entries."""
+    if not profile_name:
+        return
+    dirs = get_profile_dirs(profile_name)
+    frame_dir = dirs["frames"]
+    ref_dir = dirs["references"]
+    valid_exts = (".png", ".jpg", ".jpeg", ".webp")
+
+    existing_frames = {entry["name"] for entry in storage.list_frame_entries(profile_name)}
+    for name in sorted(os.listdir(frame_dir), key=str.lower):
+        if not name.lower().endswith(valid_exts):
+            continue
+        if name in existing_frames:
+            continue
+        path = os.path.join(frame_dir, name)
+        if os.path.isfile(path):
+            storage.add_frame(profile_name, name, path)
+
+    existing_refs = {entry["name"] for entry in storage.list_reference_entries(profile_name)}
+    for name in sorted(os.listdir(ref_dir), key=str.lower):
+        if not name.lower().endswith(valid_exts):
+            continue
+        if name in existing_refs:
+            continue
+        path = os.path.join(ref_dir, name)
+        if os.path.isfile(path):
+            storage.add_reference(profile_name, name, path, None)
+
+    list_frames(profile_name)
+    list_references(profile_name)
 
 def create_profile(profile_name):
     """
@@ -249,12 +285,50 @@ def get_profile_frame_size_fallback():
 
 def list_frames(profile_name):
     """List frame names for a profile from SQLite."""
-    return storage.list_frames(profile_name)
+    dirs = get_profile_dirs(profile_name)
+    frame_dir = dirs["frames"]
+    cleaned = []
+    for entry in storage.list_frame_entries(profile_name):
+        name = entry["name"]
+        path = entry["path"]
+        if not name or not path:
+            # Remove incomplete rows so missing metadata does not linger in UI lists.
+            storage.delete_frame(profile_name, name)
+            continue
+        expected = os.path.join(frame_dir, name)
+        if path and os.path.isfile(path):
+            cleaned.append(name)
+            continue
+        if os.path.isfile(expected):
+            storage.update_frame_path(profile_name, name, expected)
+            cleaned.append(name)
+            continue
+        storage.delete_frame(profile_name, name)
+    return cleaned
 
 
 def list_references(profile_name):
     """List reference names for a profile from SQLite."""
-    return storage.list_references(profile_name)
+    dirs = get_profile_dirs(profile_name)
+    ref_dir = dirs["references"]
+    cleaned = []
+    for entry in storage.list_reference_entries(profile_name):
+        name = entry["name"]
+        path = entry["path"]
+        if not name or not path:
+            # Remove incomplete rows so missing metadata does not linger in UI lists.
+            storage.delete_reference(profile_name, name)
+            continue
+        expected = os.path.join(ref_dir, name)
+        if path and os.path.isfile(path):
+            cleaned.append(name)
+            continue
+        if os.path.isfile(expected):
+            storage.update_reference_path(profile_name, name, expected)
+            cleaned.append(name)
+            continue
+        storage.delete_reference(profile_name, name)
+    return cleaned
 
 
 def list_debug_frames(profile_name, allow_fallback=False):
@@ -364,10 +438,16 @@ def import_frames(profile_name, file_paths):
             continue
         name = os.path.basename(src)
         dst = os.path.join(frames_dir, name)
-        if not os.path.exists(dst):
-            shutil.copy2(src, dst)
-            storage.add_frame(profile_name, name, dst)
-            added += 1
+        try:
+            if os.path.samefile(src, dst):
+                continue
+        except FileNotFoundError:
+            pass
+        if os.path.exists(dst):
+            continue
+        shutil.copy2(src, dst)
+        storage.add_frame(profile_name, name, dst)
+        added += 1
     return added
 
 

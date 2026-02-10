@@ -94,6 +94,9 @@ class FramesPanel(QWidget):
             self.update_preview(None)
             return
 
+        if app_state.selected_frame and app_state.selected_frame not in frames:
+            app_state.selected_frame = None
+
         for frame in frames:
             row = QHBoxLayout()
             select_btn = QPushButton(frame)

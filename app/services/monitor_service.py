@@ -19,6 +19,63 @@ from core.profiles import (
     get_profile_frame_size_fallback,
 )
 
+_GLOBAL_CAPTURE_LOCK = threading.Lock()
+_GLOBAL_CAPTURE = None
+_GLOBAL_QUEUE = None
+_GLOBAL_DEVICE = None
+_GLOBAL_CONFIG = None
+_GLOBAL_CAPTURE_USERS = 0  # Tracks active monitors to keep FFmpeg alive across restarts.
+
+
+def _config_matches(config, other):
+    """Compare config fields explicitly to avoid relying on dataclass equality."""
+    if not config or not other:
+        return False
+    return (
+        config.width == other.width
+        and config.height == other.height
+        and config.fps == other.fps
+    )
+
+
+def _ensure_global_capture(device_name, config):
+    """Start or reuse a single global capture source for monitoring."""
+    global _GLOBAL_CAPTURE, _GLOBAL_QUEUE, _GLOBAL_DEVICE, _GLOBAL_CONFIG, _GLOBAL_CAPTURE_USERS
+    with _GLOBAL_CAPTURE_LOCK:
+        if _GLOBAL_CAPTURE and _GLOBAL_CAPTURE.process and _GLOBAL_CAPTURE.process.poll() is None:
+            if _GLOBAL_DEVICE == device_name and _config_matches(_GLOBAL_CONFIG, config):
+                # Reference count prevents stop() from tearing down a shared capture.
+                _GLOBAL_CAPTURE_USERS += 1
+                return _GLOBAL_CAPTURE, _GLOBAL_QUEUE
+            _GLOBAL_CAPTURE.stop()
+            _GLOBAL_CAPTURE = None
+
+        _GLOBAL_QUEUE = FrameQueue(maxlen=8)
+        _GLOBAL_DEVICE = device_name
+        _GLOBAL_CONFIG = config
+        _GLOBAL_CAPTURE = FfmpegCapture(device_name, config, _GLOBAL_QUEUE)
+        _GLOBAL_CAPTURE.start()
+        _GLOBAL_CAPTURE_USERS = 1
+        return _GLOBAL_CAPTURE, _GLOBAL_QUEUE
+
+
+def _release_global_capture():
+    """Release a global capture user and stop FFmpeg only when unused."""
+    global _GLOBAL_CAPTURE, _GLOBAL_QUEUE, _GLOBAL_DEVICE, _GLOBAL_CONFIG, _GLOBAL_CAPTURE_USERS
+    with _GLOBAL_CAPTURE_LOCK:
+        if _GLOBAL_CAPTURE_USERS <= 0:
+            return
+        _GLOBAL_CAPTURE_USERS -= 1
+        # Keep FFmpeg alive while other monitors are still using it.
+        if _GLOBAL_CAPTURE_USERS > 0:
+            return
+        if _GLOBAL_CAPTURE:
+            _GLOBAL_CAPTURE.stop()
+        _GLOBAL_CAPTURE = None
+        _GLOBAL_QUEUE = None
+        _GLOBAL_DEVICE = None
+        _GLOBAL_CONFIG = None
+
 
 class MonitorService(QThread):
     """Background thread that captures camera frames and runs detection. Emits status on match."""
@@ -33,6 +90,7 @@ class MonitorService(QThread):
         self._stop_event = threading.Event()
         self._capture = None
         self._processing_thread = None
+        self._capture_acquired = False
 
     def run(self):
         """Run capture + processing loops in background threads (non-UI)."""
@@ -69,11 +127,11 @@ class MonitorService(QThread):
                 height,
             )
 
-            queue = FrameQueue(maxlen=8)
             config = CaptureConfig(width=width, height=height, fps=fps)
             try:
-                self._capture = FfmpegCapture(device_name, config, queue)
-                self._capture.start()
+                self._capture, queue = _ensure_global_capture(device_name, config)
+                # Track acquisition so stop() is idempotent and doesn't double-release.
+                self._capture_acquired = True
             except FfmpegNotFoundError as exc:
                 self.status.emit(f"FFmpeg not found ({exc})")
                 return
@@ -178,8 +236,9 @@ class MonitorService(QThread):
     def stop(self):
         """Stop capture + processing and release subprocess resources."""
         self._stop_event.set()
-        if self._capture:
-            self._capture.stop()
+        if self._capture and self._capture_acquired:
+            _release_global_capture()
+            self._capture_acquired = False
         if self._processing_thread and self._processing_thread.is_alive():
             self._processing_thread.join(timeout=5)
         app_state.monitoring_active = False

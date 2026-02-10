@@ -74,3 +74,35 @@ class StorageTests(unittest.TestCase):
         legacy_dir.mkdir(parents=True, exist_ok=True)
         names = profiles.list_profiles()
         self.assertIn("Legacy", names)
+
+    def test_missing_file_cleanup(self):
+        """Missing frame/reference files are removed from SQLite listings."""
+        profiles.create_profile("Delta")
+        frame_dir = Path("Data") / "Profiles" / "Delta" / "frames"
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        frame_path = frame_dir / "gone.png"
+        frame_path.write_bytes(b"fake")
+        storage.add_frame("Delta", frame_path.name, str(frame_path))
+        frame_path.unlink()
+        self.assertNotIn("gone.png", profiles.list_frames("Delta"))
+        self.assertEqual(storage.list_frames("Delta"), [])
+
+        ref_dir = Path("Data") / "Profiles" / "Delta" / "references"
+        ref_dir.mkdir(parents=True, exist_ok=True)
+        ref_path = ref_dir / "missing_ref.png"
+        ref_path.write_bytes(b"fake")
+        storage.add_reference("Delta", ref_path.name, str(ref_path), None)
+        ref_path.unlink()
+        self.assertNotIn("missing_ref.png", profiles.list_references("Delta"))
+        self.assertEqual(storage.list_references("Delta"), [])
+
+    def test_import_guard_skips_self_copy(self):
+        """Import guard skips copying a frame into itself."""
+        profiles.create_profile("Echo")
+        frame_dir = Path("Data") / "Profiles" / "Echo" / "frames"
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        frame_path = frame_dir / "self.png"
+        frame_path.write_bytes(b"fake")
+        added = profiles.import_frames("Echo", [str(frame_path)])
+        self.assertEqual(added, 0)
+        self.assertEqual(storage.list_frames("Echo"), [])

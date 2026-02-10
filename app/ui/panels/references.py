@@ -97,6 +97,9 @@ class ReferencesPanel(QWidget):
             self.update_preview(None)
             return
 
+        if app_state.selected_reference and app_state.selected_reference not in refs:
+            app_state.selected_reference = None
+
         for ref in refs:
             parent = get_reference_parent_frame(profile, ref)
             row = QHBoxLayout()
@@ -154,6 +157,7 @@ class ReferencesPanel(QWidget):
 
     def create_reference(self):
         if not app_state.selected_frame:
+            QMessageBox.warning(self, "Create Reference", "Select a frame first.")
             return
         from app.ui.panels.crop_panel import CropPanel
 
