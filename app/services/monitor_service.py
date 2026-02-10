@@ -15,8 +15,9 @@ from app.services.ffmpeg_capture_supervisor import LogLevel
 from app.services.ffmpeg_tools import (
     CaptureConfig,
     FfmpegNotFoundError,
+    build_capture_input_candidates,
     list_camera_devices,
-    resolve_camera_device_token,
+    verify_windows_dshow_device_token,
 )
 from app.services.frame_bus import FrameQueue
 from app.services.frame_consumers import DetectionConsumer, MetricsConsumer, SnapshotConsumer
@@ -37,6 +38,8 @@ _GLOBAL_LOCK = threading.Lock()
 _GLOBAL_CAPTURE: FfmpegCapture | None = None
 _GLOBAL_QUEUE: FrameQueue | None = None
 _GLOBAL_USERS = 0
+_GLOBAL_INPUT_TOKEN: str | None = None
+_GLOBAL_CONFIG: CaptureConfig | None = None
 
 
 def _camera_debug_enabled() -> bool:
@@ -54,21 +57,32 @@ def _camera_debug_dump(section: str, payload: str) -> None:
 
 
 def _ensure_global_capture(input_token: str, config: CaptureConfig) -> tuple[FfmpegCapture, FrameQueue]:
-    global _GLOBAL_CAPTURE, _GLOBAL_QUEUE, _GLOBAL_USERS
+    global _GLOBAL_CAPTURE, _GLOBAL_QUEUE, _GLOBAL_USERS, _GLOBAL_INPUT_TOKEN, _GLOBAL_CONFIG
     with _GLOBAL_LOCK:
         if _GLOBAL_CAPTURE and _GLOBAL_CAPTURE.is_alive():
-            _GLOBAL_USERS += 1
-            return _GLOBAL_CAPTURE, _GLOBAL_QUEUE
+            same_token = _GLOBAL_INPUT_TOKEN == input_token
+            same_config = _GLOBAL_CONFIG == config
+            if same_token and same_config:
+                _GLOBAL_USERS += 1
+                return _GLOBAL_CAPTURE, _GLOBAL_QUEUE
+            _GLOBAL_CAPTURE.stop()
+            if _GLOBAL_QUEUE:
+                _GLOBAL_QUEUE.clear(stale=True)
+            _GLOBAL_CAPTURE = None
+            _GLOBAL_QUEUE = None
+            _GLOBAL_USERS = 0
 
         _GLOBAL_QUEUE = FrameQueue(maxlen=8)
         _GLOBAL_CAPTURE = FfmpegCapture(input_token=input_token, config=config, frame_queue=_GLOBAL_QUEUE)
         _GLOBAL_CAPTURE.start()
+        _GLOBAL_INPUT_TOKEN = input_token
+        _GLOBAL_CONFIG = config
         _GLOBAL_USERS = 1
         return _GLOBAL_CAPTURE, _GLOBAL_QUEUE
 
 
 def _release_global_capture(clear_queue: bool = False) -> None:
-    global _GLOBAL_CAPTURE, _GLOBAL_QUEUE, _GLOBAL_USERS
+    global _GLOBAL_CAPTURE, _GLOBAL_QUEUE, _GLOBAL_USERS, _GLOBAL_INPUT_TOKEN, _GLOBAL_CONFIG
     with _GLOBAL_LOCK:
         if _GLOBAL_USERS <= 0:
             return
@@ -81,6 +95,8 @@ def _release_global_capture(clear_queue: bool = False) -> None:
             _GLOBAL_QUEUE.clear(stale=True)
         _GLOBAL_CAPTURE = None
         _GLOBAL_QUEUE = None
+        _GLOBAL_INPUT_TOKEN = None
+        _GLOBAL_CONFIG = None
 
 
 def get_latest_global_frame():
@@ -136,6 +152,9 @@ class MonitorService(QThread):
         if not self._set_state(MonitoringState.STARTING.value, self._state.request_start):
             return
         try:
+            self._stop_event.clear()
+            self._capture = None
+            self._capture_acquired = False
             profile = app_state.active_profile
             if not profile:
                 self.status.emit("No profile selected")
@@ -163,8 +182,8 @@ class MonitorService(QThread):
                 enumerated_names,
             )
             _camera_debug_dump("CAMERA_SELECTION", f"profile={profile}\nstored={selected_display_name}\navailable={enumerated_names}")
-            input_token = resolve_camera_device_token(selected_display_name)
-            if not input_token:
+            input_candidates = build_capture_input_candidates(selected_display_name)
+            if not input_candidates:
                 logging.warning(
                     "[CAM_CAPTURE] selected camera %r missing from current enumeration; invalidating profile field",
                     selected_display_name,
@@ -182,9 +201,39 @@ class MonitorService(QThread):
             fps = get_profile_fps(profile)
 
             config = CaptureConfig(width=width, height=height, fps=fps)
-            logging.info("[CAM_CAPTURE] selected display_name=%r resolved input token=%r", selected_display_name, input_token)
-            self._capture, queue = _ensure_global_capture(input_token, config)
-            self._capture_acquired = True
+            force_start = os.environ.get("CAMERA_FORCE_START", "").strip() in {"1", "true", "TRUE", "yes", "on"}
+            verified_candidates = []
+            for candidate in input_candidates:
+                ok, details = verify_windows_dshow_device_token(candidate.token)
+                _camera_debug_dump("CAM_VERIFY_RESULT", f"token={candidate.token}\nreason={candidate.reason}\nok={ok}\ndetails={details}")
+                if ok:
+                    verified_candidates.append(candidate)
+            if not verified_candidates and not force_start:
+                self.status.emit("Selected camera appears temporarily unavailable. Retry or set CAMERA_FORCE_START=1.")
+                self._state.mark_failed()
+                return
+
+            attempts = verified_candidates or input_candidates
+            queue = None
+            self._capture = None
+            for idx, candidate in enumerate(attempts, start=1):
+                logging.info("[CAM_CAPTURE] attempt %s using token=%r reason=%s", idx, candidate.token, candidate.reason)
+                _camera_debug_dump("CAM_CAPTURE_ATTEMPT", f"attempt={idx}\ntoken={candidate.token}\nreason={candidate.reason}")
+                cap, queue = _ensure_global_capture(candidate.token, config)
+                self._capture = cap
+                self._capture_acquired = True
+                time.sleep(0.6)
+                if cap.is_alive():
+                    logging.info("[CAM_CAPTURE] attempt %s succeeded", idx)
+                    break
+                _camera_debug_dump("CAM_CAPTURE_ATTEMPT_FAIL", f"attempt={idx}\ntoken={candidate.token}\nlast_error={cap.last_error}")
+                _release_global_capture(clear_queue=True)
+                self._capture_acquired = False
+                self._capture = None
+            if not self._capture or not self._capture.is_alive() or queue is None:
+                self.status.emit("FFmpeg capture failed. Retry monitoring or reselect camera.")
+                self._state.mark_failed()
+                return
 
             self._state.mark_running()
             self.state_changed.emit(MonitoringState.RUNNING.value)

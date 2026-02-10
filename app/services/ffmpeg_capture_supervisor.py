@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 
+from app.services.camera_enumerator import append_camera_debug_log
 from app.services.ffmpeg_tools import CaptureConfig, FfmpegNotFoundError, build_ffmpeg_capture_command
 from app.services.frame_bus import FramePacket, FrameQueue
 
@@ -41,6 +42,7 @@ class FfmpegCaptureSupervisor:
     def start(self) -> None:
         cmd = build_ffmpeg_capture_command(self.input_token, self.config)
         logging.info("[CAM_CAPTURE] start ffmpeg with input token %r", self.input_token)
+        append_camera_debug_log("CAM_CAPTURE_START", f"input_token={self.input_token}\ncmd={cmd}")
         try:
             self.process = subprocess.Popen(
                 cmd,
@@ -88,6 +90,7 @@ class FfmpegCaptureSupervisor:
             level = self._classify_log(text)
             self._emit_log(level, text)
             logging.info("[CAM_CAPTURE] ffmpeg stderr: %s", text)
+            append_camera_debug_log("CAM_CAPTURE_STDERR", text)
             if level == LogLevel.ERROR:
                 self.last_error = text
 
@@ -132,6 +135,7 @@ class FfmpegCaptureSupervisor:
             self._stderr_thread.join(timeout=timeout)
         if self.process:
             logging.info("[CAM_CAPTURE] ffmpeg exit code: %s", self.process.returncode)
+            append_camera_debug_log("CAM_CAPTURE_EXIT", str(self.process.returncode))
 
     def is_alive(self) -> bool:
         return bool(self.process and self.process.poll() is None)
