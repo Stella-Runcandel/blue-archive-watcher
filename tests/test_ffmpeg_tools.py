@@ -30,3 +30,9 @@ class FfmpegToolsTests(unittest.TestCase):
         ffmpeg_tools._ENUM_CACHE = ["Cached Cam"]
         self.assertEqual(ffmpeg_tools.list_video_devices(), ["Cached Cam"])
         enum_mock.assert_not_called()
+
+    @patch("app.services.ffmpeg_tools.enumerate_video_devices", return_value=["Fresh Cam"])
+    def test_list_video_devices_force_refresh_invalidates_cache(self, enum_mock):
+        ffmpeg_tools._ENUM_CACHE = ["Stale Cam"]
+        self.assertEqual(ffmpeg_tools.list_video_devices(force_refresh=True), ["Fresh Cam"])
+        enum_mock.assert_called_once()

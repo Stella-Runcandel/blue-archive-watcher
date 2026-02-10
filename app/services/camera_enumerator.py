@@ -1,8 +1,4 @@
-"""FFmpeg-based camera enumeration helpers.
-
-This module intentionally avoids Media Foundation / COM access so it can be used
-safely inside PyQt applications without apartment conflicts.
-"""
+"""FFmpeg-based camera enumeration helpers for PyQt-safe device discovery."""
 from __future__ import annotations
 
 import platform
@@ -33,6 +29,9 @@ def _parse_dshow_video_devices(output: str) -> list[str]:
         if "DirectShow audio devices" in line:
             in_video_section = False
         if not in_video_section:
+            continue
+
+        if "Alternative name" in line:
             continue
 
         match = re.search(r'"([^\"]+)"', line)
