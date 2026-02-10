@@ -49,15 +49,13 @@ class FfmpegToolsTests(unittest.TestCase):
         self.assertEqual(ffmpeg_tools.list_video_devices(), [])
 
 
-    @patch("app.services.ffmpeg_tools._run_ffmpeg_command", side_effect=RuntimeError("boom"))
+    @patch("app.services.ffmpeg_tools.enumerate_video_devices", side_effect=RuntimeError("boom"))
     @patch("app.services.ffmpeg_tools.platform.system", return_value="Windows")
-    @patch("app.services.ffmpeg_tools._probe_opencv_indices", return_value=["Camera 0"])
-    def test_list_video_devices_windows_fallback(self, probe_mock, _platform_mock, _cmd_mock):
-        """FFmpeg failure should fallback to OpenCV probing on Windows."""
+    def test_list_video_devices_windows_no_opencv_fallback(self, _platform_mock, _enum_mock):
+        """Windows path does not use OpenCV fallback and fails safe to []."""
         ffmpeg_tools._ENUM_CACHE = None
         devices = ffmpeg_tools.list_video_devices(force_refresh=True)
-        self.assertEqual(devices, ["Camera 0"])
-        probe_mock.assert_called_once()
+        self.assertEqual(devices, [])
 
     @patch("app.services.ffmpeg_tools._run_ffmpeg_command")
     def test_list_video_devices_uses_cache(self, run_mock):

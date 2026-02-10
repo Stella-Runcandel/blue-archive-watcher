@@ -1,4 +1,6 @@
 """Monitoring service orchestrating FFmpeg capture and processing threads."""
+from __future__ import annotations
+
 import logging
 import threading
 import time
@@ -7,8 +9,12 @@ import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from app.app_state import app_state
+from app.services.ffmpeg_capture_supervisor import LogLevel
 from app.services.ffmpeg_tools import CaptureConfig, FfmpegNotFoundError
-from app.services.monitor_pipeline import FrameQueue, FfmpegCapture
+from app.services.frame_bus import FrameQueue
+from app.services.frame_consumers import DetectionConsumer, MetricsConsumer, SnapshotConsumer
+from app.services.monitor_state_machine import InvalidTransition, MonitoringState, MonitoringStateMachine
+from app.services.monitor_pipeline import FfmpegCapture
 from core import detector as dect
 from core import notifier as notif
 from core.profiles import (
@@ -19,86 +25,66 @@ from core.profiles import (
     get_profile_frame_size_fallback,
 )
 
-_GLOBAL_CAPTURE_LOCK = threading.Lock()
-_GLOBAL_CAPTURE = None
-_GLOBAL_QUEUE = None
-_GLOBAL_DEVICE = None
-_GLOBAL_CONFIG = None
-_GLOBAL_CAPTURE_USERS = 0  # Tracks active monitors to keep FFmpeg alive across restarts.
+_GLOBAL_LOCK = threading.Lock()
+_GLOBAL_CAPTURE: FfmpegCapture | None = None
+_GLOBAL_QUEUE: FrameQueue | None = None
+_GLOBAL_USERS = 0
 
 
-def _config_matches(config, other):
-    """Compare config fields explicitly to avoid relying on dataclass equality."""
-    if not config or not other:
-        return False
-    return (
-        config.width == other.width
-        and config.height == other.height
-        and config.fps == other.fps
-    )
-
-
-def _ensure_global_capture(device_name, config):
-    """Start or reuse a single global capture source for monitoring."""
-    global _GLOBAL_CAPTURE, _GLOBAL_QUEUE, _GLOBAL_DEVICE, _GLOBAL_CONFIG, _GLOBAL_CAPTURE_USERS
-    with _GLOBAL_CAPTURE_LOCK:
-        if _GLOBAL_CAPTURE and _GLOBAL_CAPTURE.process and _GLOBAL_CAPTURE.process.poll() is None:
-            if _GLOBAL_DEVICE == device_name and _config_matches(_GLOBAL_CONFIG, config):
-                # Reference count prevents stop() from tearing down a shared capture.
-                _GLOBAL_CAPTURE_USERS += 1
-                return _GLOBAL_CAPTURE, _GLOBAL_QUEUE
-            _GLOBAL_CAPTURE.stop()
-            _GLOBAL_CAPTURE = None
+def _ensure_global_capture(device_name: str, config: CaptureConfig) -> tuple[FfmpegCapture, FrameQueue]:
+    global _GLOBAL_CAPTURE, _GLOBAL_QUEUE, _GLOBAL_USERS
+    with _GLOBAL_LOCK:
+        if _GLOBAL_CAPTURE and _GLOBAL_CAPTURE.is_alive():
+            _GLOBAL_USERS += 1
+            return _GLOBAL_CAPTURE, _GLOBAL_QUEUE
 
         _GLOBAL_QUEUE = FrameQueue(maxlen=8)
-        _GLOBAL_DEVICE = device_name
-        _GLOBAL_CONFIG = config
-        _GLOBAL_CAPTURE = FfmpegCapture(device_name, config, _GLOBAL_QUEUE)
+        _GLOBAL_CAPTURE = FfmpegCapture(device_name=device_name, config=config, frame_queue=_GLOBAL_QUEUE)
         _GLOBAL_CAPTURE.start()
-        _GLOBAL_CAPTURE_USERS = 1
+        _GLOBAL_USERS = 1
         return _GLOBAL_CAPTURE, _GLOBAL_QUEUE
 
 
-def _release_global_capture():
-    """Release a global capture user and stop FFmpeg only when unused."""
-    global _GLOBAL_CAPTURE, _GLOBAL_QUEUE, _GLOBAL_DEVICE, _GLOBAL_CONFIG, _GLOBAL_CAPTURE_USERS
-    with _GLOBAL_CAPTURE_LOCK:
-        if _GLOBAL_CAPTURE_USERS <= 0:
+def _release_global_capture(clear_queue: bool = False) -> None:
+    global _GLOBAL_CAPTURE, _GLOBAL_QUEUE, _GLOBAL_USERS
+    with _GLOBAL_LOCK:
+        if _GLOBAL_USERS <= 0:
             return
-        _GLOBAL_CAPTURE_USERS -= 1
-        # Keep FFmpeg alive while other monitors are still using it.
-        if _GLOBAL_CAPTURE_USERS > 0:
+        _GLOBAL_USERS -= 1
+        if _GLOBAL_USERS > 0:
             return
         if _GLOBAL_CAPTURE:
             _GLOBAL_CAPTURE.stop()
+        if _GLOBAL_QUEUE and clear_queue:
+            _GLOBAL_QUEUE.clear(stale=True)
         _GLOBAL_CAPTURE = None
         _GLOBAL_QUEUE = None
-        _GLOBAL_DEVICE = None
-        _GLOBAL_CONFIG = None
 
 
 def get_latest_global_frame():
-    """Return the latest captured frame tuple (timestamp, raw bytes) without draining queue."""
-    with _GLOBAL_CAPTURE_LOCK:
+    with _GLOBAL_LOCK:
         if not _GLOBAL_QUEUE:
             return None
-        return _GLOBAL_QUEUE.peek_latest()
+        packet = _GLOBAL_QUEUE.peek_latest()
+        if packet is None:
+            return None
+        return (packet.timestamp, packet.payload)
 
 
 def freeze_latest_global_frame():
-    """Return an immutable copy of the latest frame for freeze-frame snapshots."""
-    latest = get_latest_global_frame()
-    if latest is None:
-        return None
-    timestamp, raw = latest
-    return timestamp, bytes(raw)
+    with _GLOBAL_LOCK:
+        if not _GLOBAL_QUEUE:
+            return None
+        snap = SnapshotConsumer(_GLOBAL_QUEUE).capture_snapshot()
+        if not snap:
+            return None
+        return (snap.timestamp, snap.payload)
 
 
 class MonitorService(QThread):
-    """Background thread that captures camera frames and runs detection. Emits status on match."""
-
     status = pyqtSignal(str)
     metrics = pyqtSignal(dict)
+    state_changed = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -108,57 +94,58 @@ class MonitorService(QThread):
         self._capture = None
         self._processing_thread = None
         self._capture_acquired = False
+        self._state = MonitoringStateMachine()
+        self._detection_consumer = DetectionConsumer()
+        self._metrics = MetricsConsumer()
+
+    def current_state(self) -> MonitoringState:
+        return self._state.state
+
+    def _set_state(self, text: str, transition) -> bool:
+        try:
+            transition()
+        except InvalidTransition as exc:
+            self.status.emit(f"State error: {exc}")
+            return False
+        self.state_changed.emit(text)
+        return True
 
     def run(self):
-        """Run capture + processing loops in background threads (non-UI)."""
+        if not self._set_state(MonitoringState.STARTING.value, self._state.request_start):
+            return
         try:
             profile = app_state.active_profile
             if not profile:
                 self.status.emit("No profile selected")
+                self._state.mark_failed()
                 return
 
             get_profile_dirs(profile)
             if not app_state.selected_reference:
                 self.status.emit("No reference selected")
+                self._state.mark_failed()
                 return
+
             device_name = get_profile_camera_device(profile)
             if not device_name:
                 self.status.emit("No camera selected")
+                self._state.mark_failed()
                 return
 
             width, height = get_profile_frame_size(profile)
             if not width or not height:
                 width, height = get_profile_frame_size_fallback()
-                logging.warning("Profile frame size not found; using fallback %sx%s", width, height)
-
             fps = get_profile_fps(profile)
 
+            config = CaptureConfig(width=width, height=height, fps=fps)
+            self._capture, queue = _ensure_global_capture(device_name, config)
+            self._capture_acquired = True
+
+            self._state.mark_running()
+            self.state_changed.emit(MonitoringState.RUNNING.value)
             app_state.monitoring_active = True
             self.running = True
-            self._stop_event.clear()
             self.status.emit("Monitoring...")
-            self.detector_state = dect.new_detector_state()
-            logging.info(
-                "Monitoring start profile=%s device=%s fps=%s size=%sx%s",
-                profile,
-                device_name,
-                fps,
-                width,
-                height,
-            )
-
-            config = CaptureConfig(width=width, height=height, fps=fps)
-            try:
-                self._capture, queue = _ensure_global_capture(device_name, config)
-                # Track acquisition so stop() is idempotent and doesn't double-release.
-                self._capture_acquired = True
-            except FfmpegNotFoundError as exc:
-                self.status.emit(f"FFmpeg not found ({exc})")
-                return
-            except Exception:
-                logging.error("FFmpeg capture failed to start", exc_info=True)
-                self.status.emit("FFmpeg capture failed")
-                return
 
             self._processing_thread = threading.Thread(
                 target=self._processing_loop,
@@ -168,103 +155,112 @@ class MonitorService(QThread):
             self._processing_thread.start()
 
             while not self._stop_event.is_set():
-                if self._capture and self._capture.process and self._capture.process.poll() is not None:
-                    logging.error("FFmpeg exited unexpectedly")
+                if self._capture and not self._capture.is_alive():
                     self.status.emit("FFmpeg exited unexpectedly")
+                    self._state.mark_failed()
                     break
-                time.sleep(0.2)
+                self._drain_ffmpeg_logs()
+                time.sleep(0.15)
+        except FfmpegNotFoundError as exc:
+            self.status.emit(f"FFmpeg not found ({exc})")
+            self._state.mark_failed()
+        except Exception as exc:
+            logging.error("Monitoring crash", exc_info=True)
+            self.status.emit(f"Monitoring failure ({exc})")
+            try:
+                self._state.mark_failed()
+            except InvalidTransition:
+                pass
         finally:
-            self.stop()
-            self.running = False
-            app_state.monitoring_active = False
-            self.status.emit("Stopped")
-            logging.info("Monitoring stopped")
+            self.stop(clear_queue=self._state.state == MonitoringState.FAILED)
 
-    def _processing_loop(self, profile, queue, width, height):
-        """Process frames off the queue and emit deterministic detection results."""
+    def _drain_ffmpeg_logs(self):
+        if not self._capture:
+            return
+        while not self._capture.log_events.empty():
+            event = self._capture.log_events.get_nowait()
+            if event.level == LogLevel.ERROR:
+                self.status.emit(f"FFmpeg error: {event.message}")
+
+    def _processing_loop(self, profile, queue: FrameQueue, width: int, height: int):
         processed = 0
-        last_metrics = time.time()
+        start = time.time()
         last_confidence = 0.0
         selected_reference = app_state.selected_reference
         last_detection_time = None
 
         while not self._stop_event.is_set():
-            item = queue.get(timeout=0.5)
-            if item is None:
+            pkt = queue.get(timeout=0.5)
+            if pkt is None:
                 continue
 
-            _timestamp, raw = item
+            self._metrics.on_frame()
+            raw = pkt.payload
             frame = np.frombuffer(raw, dtype=np.uint8)
             expected = width * height * 3
             if frame.size != expected:
-                logging.warning("Frame size mismatch: got %s expected %s", frame.size, expected)
+                continue
+            if self._detection_consumer.is_paused():
                 continue
 
             frame = frame.reshape((height, width, 3))
-            try:
-                result = dect.evaluate_frame(
-                    profile,
-                    frame,
-                    self.detector_state,
-                    selected_reference=selected_reference,
-                )
-                last_confidence = result.confidence
-                if result.matched:
-                    self.status.emit("Dialogue detected!")
-                    last_detection_time = result.timestamp
-                    try:
-                        notif.alert()
-                    except Exception:
-                        logging.error("Alert backend failure", exc_info=True)
-            except Exception:
-                logging.error("Detection crash", exc_info=True)
-                self.status.emit("Detection failure")
-                self._stop_event.set()
-                break
+            result = dect.evaluate_frame(
+                profile,
+                frame,
+                self.detector_state,
+                selected_reference=selected_reference,
+            )
+            last_confidence = result.confidence
+            if result.matched:
+                self.status.emit("Dialogue detected!")
+                last_detection_time = result.timestamp
+                try:
+                    notif.alert()
+                except Exception:
+                    logging.exception("Alert backend failure")
 
             processed += 1
             now = time.time()
-            if now - last_metrics >= 5:
-                capture_fps = 0.0
-                dropped = queue.dropped
-                if self._capture:
-                    capture_fps = self._capture.frames_captured / max(0.001, now - last_metrics)
-                    self._capture.frames_captured = 0
-                process_fps = processed / max(0.001, now - last_metrics)
-                logging.info(
-                    "Monitor metrics: capture_fps=%.2f process_fps=%.2f dropped=%s confidence=%.4f",
-                    capture_fps,
-                    process_fps,
-                    dropped,
-                    last_confidence,
-                )
-                queue_fill = (queue.size() / max(1, queue.maxlen)) * 100
+            if now - start >= 5:
                 self.metrics.emit(
                     {
-                        "capture_fps": capture_fps,
-                        "process_fps": process_fps,
-                        "dropped": dropped,
-                        "queue_fill": queue_fill,
+                        "capture_fps": self._metrics.capture_fps,
+                        "process_fps": processed / max(0.001, now - start),
+                        "dropped": queue.dropped_frames,
+                        "queue_fill": (queue.size() / max(1, queue.maxlen)) * 100,
                         "profile": profile,
                         "monitoring": True,
                         "last_detection_time": last_detection_time,
+                        "confidence": last_confidence,
                     }
                 )
                 processed = 0
-                last_metrics = now
+                start = now
 
-    def stop(self):
-        """Stop capture + processing and release subprocess resources."""
-        if self._stop_event.is_set():
+    def stop(self, clear_queue: bool = False):
+        if self._state.state in (MonitoringState.IDLE, MonitoringState.STOPPING):
             return
+
+        try:
+            self._state.request_stop()
+            self.state_changed.emit(MonitoringState.STOPPING.value)
+        except InvalidTransition:
+            pass
+
         self._stop_event.set()
-
-        if self._capture and self._capture_acquired:
-            _release_global_capture()
-            self._capture_acquired = False
-
         if self._processing_thread and self._processing_thread.is_alive():
             self._processing_thread.join(timeout=5)
 
+        if self._capture and self._capture_acquired:
+            _release_global_capture(clear_queue=clear_queue)
+            self._capture_acquired = False
+
+        self.running = False
         app_state.monitoring_active = False
 
+        try:
+            self._state.mark_idle()
+        except InvalidTransition:
+            self._state = MonitoringStateMachine()
+        self.state_changed.emit(MonitoringState.IDLE.value)
+        self.status.emit("Stopped")

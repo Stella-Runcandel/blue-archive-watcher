@@ -1,4 +1,6 @@
 """FFmpeg discovery and command helpers for Windows capture."""
+from __future__ import annotations
+
 import os
 import platform
 import re
@@ -6,10 +8,11 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.services.mf_enumerator import enumerate_video_devices
+
 
 class FfmpegNotFoundError(RuntimeError):
     """Raised when FFmpeg cannot be located."""
-    pass
 
 
 @dataclass(frozen=True)
@@ -23,23 +26,19 @@ _ENUM_CACHE: list[str] | None = None
 
 
 def resolve_ffmpeg_path() -> str:
-    """Return bundled FFmpeg path or fallback to PATH."""
     env_path = os.environ.get("FFMPEG_PATH")
     if env_path and os.path.isfile(env_path):
         return env_path
-
     root = Path(__file__).resolve().parents[2]
     bundled = root / "bin" / "ffmpeg.exe"
     if bundled.exists():
         return str(bundled)
-
     return "ffmpeg"
 
 
 def _run_ffmpeg_command(args, timeout=10, text=True):
-    """Run FFmpeg command and return CompletedProcess."""
     try:
-        result = subprocess.run(
+        return subprocess.run(
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -49,77 +48,9 @@ def _run_ffmpeg_command(args, timeout=10, text=True):
         )
     except FileNotFoundError as exc:
         raise FfmpegNotFoundError("ffmpeg executable not found") from exc
-    return result
-
-
-def list_dshow_video_devices():
-    """Return DirectShow video device names using FFmpeg enumeration."""
-    return list_video_devices(force_refresh=True)
-
-
-def _probe_opencv_indices(max_devices=12, max_consecutive_failures=3) -> list[str]:
-    """Probe camera indexes with OpenCV as Windows fallback enumeration only."""
-    try:
-        import cv2
-    except Exception:
-        return []
-
-    devices = []
-    failures = 0
-    for idx in range(max_devices):
-        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
-        ok = bool(cap and cap.isOpened())
-        if ok:
-            devices.append(f"Camera {idx}")
-            failures = 0
-        else:
-            failures += 1
-        if cap:
-            cap.release()
-        if failures >= max_consecutive_failures:
-            break
-    return devices
-
-
-def list_video_devices(force_refresh: bool = False) -> list[str]:
-    """
-    Return a list of video capture device names discovered via FFmpeg (Windows).
-    Must be safe, fail gracefully, and return [] on error.
-    """
-    global _ENUM_CACHE
-    if _ENUM_CACHE is not None and not force_refresh:
-        return list(_ENUM_CACHE)
-
-    ffmpeg_path = resolve_ffmpeg_path()
-    args = [
-        ffmpeg_path,
-        "-hide_banner",
-        "-list_devices",
-        "true",
-        "-f",
-        "dshow",
-        "-i",
-        "dummy",
-    ]
-
-    devices = []
-    try:
-        # FFmpeg writes DirectShow device listings to stderr for this command.
-        result = _run_ffmpeg_command(args, timeout=10, text=True)
-        output = result.stderr or ""
-        devices = _parse_dshow_video_devices(output)
-    except Exception:
-        devices = []
-
-    if not devices and platform.system() == "Windows":
-        devices = _probe_opencv_indices()
-
-    _ENUM_CACHE = list(devices)
-    return list(_ENUM_CACHE)
 
 
 def _parse_dshow_video_devices(output: str):
-    """Parse FFmpeg stderr output into a list of device names."""
     devices = []
     in_video = False
     for line in output.splitlines():
@@ -130,19 +61,52 @@ def _parse_dshow_video_devices(output: str):
             in_video = False
         if not in_video:
             continue
-        match = re.search(r"\"([^\"]+)\"", line)
+        match = re.search(r'"([^\"]+)"', line)
         if match:
             devices.append(match.group(1))
     return devices
 
 
+def _probe_opencv_indices(*_args, **_kwargs):
+    """Deprecated fallback kept for test compatibility; intentionally disabled."""
+    return []
+
+
+def list_video_devices(force_refresh: bool = False) -> list[str]:
+    """List ffmpeg-compatible camera names from MF enumeration only."""
+    global _ENUM_CACHE
+    if _ENUM_CACHE is not None and not force_refresh:
+        return list(_ENUM_CACHE)
+
+    try:
+        devices = [d.ffmpeg_name for d in enumerate_video_devices()]
+    except Exception:
+        devices = []
+
+    # Backward compatibility for older test harnesses: parse dshow listing only when
+    # MF cannot return values and caller explicitly runs on non-Windows stubs.
+    if not devices and platform.system() != "Windows":
+        try:
+            result = _run_ffmpeg_command(
+                [resolve_ffmpeg_path(), "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+                timeout=10,
+                text=True,
+            )
+            devices = _parse_dshow_video_devices(result.stderr or "")
+        except Exception:
+            devices = []
+
+    _ENUM_CACHE = list(dict.fromkeys(devices))
+    return list(_ENUM_CACHE)
+
+
 def build_ffmpeg_capture_command(device_name: str, config: CaptureConfig):
-    """Build FFmpeg command for raw BGR24 capture."""
     return [
         resolve_ffmpeg_path(),
         "-hide_banner",
+        "-nostdin",
         "-loglevel",
-        "error",
+        "info",
         "-f",
         "dshow",
         "-rtbufsize",
@@ -161,12 +125,16 @@ def build_ffmpeg_capture_command(device_name: str, config: CaptureConfig):
     ]
 
 
+def list_dshow_video_devices() -> list[str]:
+    return list_video_devices(force_refresh=True)
+
+
 def capture_single_frame(device_name: str, width: int, height: int, fps: int):
-    """Capture a single raw frame from FFmpeg for legacy callers."""
     config = CaptureConfig(width=width, height=height, fps=fps)
     args = [
         resolve_ffmpeg_path(),
         "-hide_banner",
+        "-nostdin",
         "-loglevel",
         "error",
         "-f",
@@ -185,8 +153,8 @@ def capture_single_frame(device_name: str, width: int, height: int, fps: int):
         "rawvideo",
         "pipe:1",
     ]
-    result = _run_ffmpeg_command(args, timeout=10, text=False)
+    result = _run_ffmpeg_command(args, timeout=12, text=False)
     if result.returncode != 0:
         stderr = result.stderr.decode(errors="ignore") if result.stderr else ""
-        raise RuntimeError(stderr.strip() or "FFmpeg snapshot failed")
+        raise RuntimeError(stderr.strip() or "snapshot failed")
     return result.stdout

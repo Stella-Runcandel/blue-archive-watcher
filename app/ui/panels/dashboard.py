@@ -125,7 +125,7 @@ class DashboardPanel(QWidget):
 
         self.start_btn = QPushButton("▶ Start Monitoring")
         self.stop_btn = QPushButton("⏹ Stop")
-        self.freeze_btn = QPushButton("❄ Freeze Frame")
+        self.freeze_btn = QPushButton("📸 Capture Snapshot")
         self.unfreeze_btn = QPushButton("▶ Live Preview")
         for button in [self.start_btn, self.stop_btn, self.freeze_btn, self.unfreeze_btn]:
             button.setStyleSheet(Styles.button())
@@ -274,10 +274,10 @@ class DashboardPanel(QWidget):
     def freeze_frame(self):
         frozen = freeze_latest_global_frame()
         if frozen is None:
-            self.status_label.setText("No frame available to freeze")
+            self.status_label.setText("No frame available to capture")
             return
         self._frozen_frame = frozen
-        self.status_label.setText("Preview frozen")
+        self.status_label.setText("Snapshot captured")
         self.update_camera_preview()
 
     def unfreeze_frame(self):
