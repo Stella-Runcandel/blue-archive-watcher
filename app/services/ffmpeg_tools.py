@@ -1,6 +1,7 @@
 """FFmpeg discovery and command helpers for camera capture."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import platform
@@ -8,7 +9,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.services.camera_enumerator import CameraDevice, enumerate_video_devices
+from app.services.camera_enumerator import CameraDevice, append_camera_debug_log, enumerate_video_devices
 
 LOG = logging.getLogger(__name__)
 
@@ -24,6 +25,12 @@ class CaptureConfig:
     fps: int
 
 
+@dataclass(frozen=True)
+class CaptureInputCandidate:
+    token: str
+    reason: str
+
+
 _ENUM_CACHE: list[CameraDevice] | None = None
 
 
@@ -32,7 +39,7 @@ def _normalize_camera_device(device: CameraDevice | str) -> CameraDevice:
         return device
     name = str(device)
     token = f"video={name}"
-    return CameraDevice(display_name=name, ffmpeg_token=token)
+    return CameraDevice(display_name=name, ffmpeg_token=token, backend="dshow", is_virtual=False)
 
 
 def resolve_ffmpeg_path() -> str:
@@ -60,11 +67,6 @@ def _run_ffmpeg_command(args, timeout=10, text=True):
         raise FfmpegNotFoundError("ffmpeg executable not found") from exc
 
 
-def _probe_opencv_indices(*_args, **_kwargs):
-    """Deprecated fallback kept for test compatibility; intentionally disabled."""
-    return []
-
-
 def list_camera_devices(force_refresh: bool = False) -> list[CameraDevice]:
     global _ENUM_CACHE
     if _ENUM_CACHE is not None and not force_refresh:
@@ -88,6 +90,7 @@ def list_camera_devices(force_refresh: bool = False) -> list[CameraDevice]:
 
     _ENUM_CACHE = deduped
     LOG.info("[CAM_ENUM] cached camera devices: %s", _ENUM_CACHE)
+    append_camera_debug_log("CAM_ENUM_CACHE", json.dumps([d.__dict__ for d in _ENUM_CACHE], ensure_ascii=False, indent=2))
     return list(_ENUM_CACHE)
 
 
@@ -96,21 +99,87 @@ def list_video_devices(force_refresh: bool = False) -> list[str]:
     return [d.display_name for d in list_camera_devices(force_refresh=force_refresh)]
 
 
+def _find_camera_device(selected_display_name: str, force_refresh: bool = False) -> CameraDevice | None:
+    devices = list_camera_devices(force_refresh=force_refresh)
+    for device in devices:
+        if device.display_name.casefold() == selected_display_name.casefold():
+            return device
+    return None
+
+
+def build_capture_input_candidates(selected_display_name: str, force_refresh: bool = False) -> list[CaptureInputCandidate]:
+    device = _find_camera_device(selected_display_name, force_refresh=force_refresh)
+    if not device:
+        return []
+
+    candidates: list[CaptureInputCandidate] = [CaptureInputCandidate(device.ffmpeg_token, "exact-enumerated-token")]
+    if platform.system() == "Windows":
+        if not device.ffmpeg_token.startswith('video="'):
+            candidates.append(CaptureInputCandidate(f'video="{device.display_name}"', "quoted-dshow-token"))
+        if not device.ffmpeg_token.startswith("video="):
+            candidates.append(CaptureInputCandidate(f"video={device.display_name}", "raw-name-with-video-prefix"))
+        candidates.append(CaptureInputCandidate(device.display_name, "raw-device-name"))
+
+    deduped: list[CaptureInputCandidate] = []
+    seen: set[str] = set()
+    for item in candidates:
+        if item.token in seen:
+            continue
+        seen.add(item.token)
+        deduped.append(item)
+
+    append_camera_debug_log("CAM_CAPTURE_CANDIDATES", json.dumps([i.__dict__ for i in deduped], ensure_ascii=False, indent=2))
+    return deduped
+
+
+def verify_windows_dshow_device_token(input_token: str, timeout: int = 8) -> tuple[bool, str]:
+    if platform.system() != "Windows":
+        return True, "non-windows"
+
+    args = [resolve_ffmpeg_path(), "-hide_banner", "-f", "dshow", "-i", input_token, "-t", "0.2", "-f", "null", "-"]
+    append_camera_debug_log("CAM_VERIFY_CMD", " ".join(args))
+    try:
+        result = _run_ffmpeg_command(args, timeout=timeout, text=True)
+    except Exception as exc:
+        return False, str(exc)
+
+    stderr = result.stderr or ""
+    append_camera_debug_log("CAM_VERIFY_STDERR", stderr)
+    lowered = stderr.lower()
+    fail_tokens = ("could not find video device", "error opening input", "i/o error")
+    if any(token in lowered for token in fail_tokens):
+        return False, stderr.strip() or "verification failed"
+    return True, stderr.strip() or "ok"
+
+
 def resolve_camera_device_token(selected_display_name: str, force_refresh: bool = False) -> str | None:
     if not selected_display_name:
         LOG.warning("[CAM_CAPTURE] selected display name is empty")
         return None
 
-    devices = list_camera_devices(force_refresh=force_refresh)
+    device = _find_camera_device(selected_display_name, force_refresh=force_refresh)
+    devices = list_camera_devices(force_refresh=False)
     names = [d.display_name for d in devices]
     LOG.info("[CAM_CAPTURE] resolve selected device display_name=%r available=%s", selected_display_name, names)
 
-    for device in devices:
-        if device.display_name.casefold() == selected_display_name.casefold():
-            LOG.info("[CAM_CAPTURE] resolved token for %r -> %r", selected_display_name, device.ffmpeg_token)
-            return device.ffmpeg_token
+    if device:
+        LOG.info("[CAM_CAPTURE] resolved token for %r -> %r", selected_display_name, device.ffmpeg_token)
+        append_camera_debug_log(
+            "CAM_CAPTURE_TOKEN_RESOLVE",
+            json.dumps(
+                {
+                    "selected_display_name": selected_display_name,
+                    "resolved_token": device.ffmpeg_token,
+                    "backend": device.backend,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+        return device.ffmpeg_token
 
     LOG.warning("[CAM_CAPTURE] selected device %r is not present in enumerated devices", selected_display_name)
+    append_camera_debug_log("CAM_CAPTURE_TOKEN_RESOLVE", f"MISSING selected={selected_display_name!r} available={names!r}")
     return None
 
 
@@ -120,7 +189,7 @@ def build_ffmpeg_capture_command(input_token: str, config: CaptureConfig):
         "-hide_banner",
         "-nostdin",
         "-loglevel",
-        "info",
+        "verbose",
         "-f",
         "dshow",
         "-rtbufsize",
@@ -138,6 +207,7 @@ def build_ffmpeg_capture_command(input_token: str, config: CaptureConfig):
         "pipe:1",
     ]
     LOG.info("[CAM_CAPTURE] ffmpeg command: %s", cmd)
+    append_camera_debug_log("CAM_CAPTURE_CMD", " ".join(cmd))
     return cmd
 
 
@@ -174,8 +244,10 @@ def capture_single_frame(device_name: str, width: int, height: int, fps: int):
         "pipe:1",
     ]
     LOG.info("[CAM_CAPTURE] snapshot command: %s", args)
+    append_camera_debug_log("CAM_CAPTURE_SNAPSHOT_CMD", " ".join(args))
     result = _run_ffmpeg_command(args, timeout=12, text=False)
     if result.returncode != 0:
         stderr = result.stderr.decode(errors="ignore") if result.stderr else ""
+        append_camera_debug_log("CAM_CAPTURE_SNAPSHOT_STDERR", stderr)
         raise RuntimeError(stderr.strip() or "snapshot failed")
     return result.stdout

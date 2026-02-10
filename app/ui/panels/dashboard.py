@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
 
 from app.app_state import app_state
 from app.controllers.monitor_controller import MonitorController
-from app.services.ffmpeg_tools import list_video_devices
+from app.services.ffmpeg_tools import list_camera_devices
 from app.services.monitor_service import (
     MonitorService,
     freeze_latest_global_frame,
@@ -56,7 +56,7 @@ class DashboardPanel(QWidget):
         self.nav = nav
         self.profile_preview_bytes = None
         self._frozen_frame = None
-        self._cached_available_camera_devices = None
+        self._cached_available_camera_devices = []
 
         self.profile_label = QLabel("Profile: None")
         self.frame_label = QLabel("Selected Frame: None")
@@ -260,6 +260,7 @@ class DashboardPanel(QWidget):
             self.status_label.setText("Select a reference first")
             return
         self._frozen_frame = None
+        self.refresh_camera_devices()
         self.monitor_controller.start()
         self.status_label.setText(f"Monitoring started ({app_state.selected_reference})")
         self.refresh()
@@ -368,20 +369,26 @@ class DashboardPanel(QWidget):
         current_device = get_profile_camera_device(profile)
         logging.info("[CAM_UI] combo refresh profile=%r stored value=%r cached devices=%s", profile, current_device, self._cached_available_camera_devices)
         devices = list(self._cached_available_camera_devices or [])
-        if current_device and current_device not in devices:
-            devices.append(current_device)
 
-        unique_devices = list(dict.fromkeys(devices))
-        if not unique_devices:
+        if not devices:
             self.camera_combo.addItem("No cameras found")
             self.camera_combo.model().item(0).setEnabled(False)
             self.camera_combo.setEnabled(False)
+            if current_device:
+                set_profile_camera_device(profile, "")
         else:
-            for device in unique_devices:
-                self.camera_combo.addItem(str(device), device)
+            combo_values = []
+            for device in devices:
+                label = f"{device.display_name}{' (Virtual)' if device.is_virtual else ''}"
+                self.camera_combo.addItem(label, device.display_name)
+                combo_values.append(label)
             selected = self.camera_combo.findData(current_device)
-            logging.info("[CAM_UI] combo options=%s selected index=%s", unique_devices, selected)
-            if selected >= 0:
+            logging.info("[CAM_UI] combo options=%s selected index=%s", combo_values, selected)
+            if current_device and selected < 0:
+                set_profile_camera_device(profile, "")
+                self.status_label.setText(f"Stored camera missing: {current_device}. Please re-select.")
+                self.camera_combo.setCurrentIndex(0)
+            elif selected >= 0:
                 self.camera_combo.setCurrentIndex(selected)
             self.camera_combo.setEnabled(True)
 
@@ -395,8 +402,9 @@ class DashboardPanel(QWidget):
         if device_name is None:
             return
         display_text = self.camera_combo.itemText(index)
-        logging.info("[CAM_UI] camera changed index=%s display=%r stored=%r", index, display_text, device_name)
-        set_profile_camera_device(app_state.active_profile, device_name)
+        clean_name = str(device_name)
+        logging.info("[CAM_UI] camera changed index=%s display=%r stored=%r", index, display_text, clean_name)
+        set_profile_camera_device(app_state.active_profile, clean_name)
 
     def update_profile_preview(self):
         if not app_state.active_profile:
@@ -452,7 +460,8 @@ class DashboardPanel(QWidget):
         self.update_camera_preview()
 
     def refresh_camera_devices(self):
-        self._cached_available_camera_devices = list_video_devices(force_refresh=True)
+        devices = list_camera_devices(force_refresh=True)
+        self._cached_available_camera_devices = devices
         logging.info("[CAM_UI] refresh camera devices -> %s", self._cached_available_camera_devices)
         self.update_camera_devices()
 
