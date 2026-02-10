@@ -23,12 +23,17 @@ class CaptureConfig:
     width: int
     height: int
     fps: int
+    input_width: int | None = None
+    input_height: int | None = None
+    input_fps: int | None = None
+    label: str = "requested"
 
 
 @dataclass(frozen=True)
 class CaptureInputCandidate:
     token: str
     reason: str
+    is_virtual: bool
 
 
 _ENUM_CACHE: list[CameraDevice] | None = None
@@ -112,13 +117,23 @@ def build_capture_input_candidates(selected_display_name: str, force_refresh: bo
     if not device:
         return []
 
-    candidates: list[CaptureInputCandidate] = [CaptureInputCandidate(device.ffmpeg_token, "exact-enumerated-token")]
+    candidates: list[CaptureInputCandidate] = [
+        CaptureInputCandidate(device.ffmpeg_token, "exact-enumerated-token", is_virtual=device.is_virtual)
+    ]
     if platform.system() == "Windows":
         if not device.ffmpeg_token.startswith('video="'):
-            candidates.append(CaptureInputCandidate(f'video="{device.display_name}"', "quoted-dshow-token"))
+            candidates.append(
+                CaptureInputCandidate(f'video="{device.display_name}"', "quoted-dshow-token", is_virtual=device.is_virtual)
+            )
         if not device.ffmpeg_token.startswith("video="):
-            candidates.append(CaptureInputCandidate(f"video={device.display_name}", "raw-name-with-video-prefix"))
-        candidates.append(CaptureInputCandidate(device.display_name, "raw-device-name"))
+            candidates.append(
+                CaptureInputCandidate(
+                    f"video={device.display_name}",
+                    "raw-name-with-video-prefix",
+                    is_virtual=device.is_virtual,
+                )
+            )
+        candidates.append(CaptureInputCandidate(device.display_name, "raw-device-name", is_virtual=device.is_virtual))
 
     deduped: list[CaptureInputCandidate] = []
     seen: set[str] = set()
@@ -194,18 +209,25 @@ def build_ffmpeg_capture_command(input_token: str, config: CaptureConfig):
         "dshow",
         "-rtbufsize",
         "512M",
-        "-video_size",
-        f"{config.width}x{config.height}",
-        "-framerate",
-        str(config.fps),
+    ]
+    if config.input_width is not None and config.input_height is not None:
+        cmd.extend(["-video_size", f"{config.input_width}x{config.input_height}"])
+    if config.input_fps is not None:
+        cmd.extend(["-framerate", str(config.input_fps)])
+
+    cmd.extend([
         "-i",
         input_token,
+        "-s",
+        f"{config.width}x{config.height}",
+        "-r",
+        str(config.fps),
         "-pix_fmt",
         "bgr24",
         "-f",
         "rawvideo",
         "pipe:1",
-    ]
+    ])
     LOG.info("[CAM_CAPTURE] ffmpeg command: %s", cmd)
     append_camera_debug_log("CAM_CAPTURE_CMD", " ".join(cmd))
     return cmd

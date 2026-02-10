@@ -14,6 +14,7 @@ from app.app_state import app_state
 from app.services.ffmpeg_capture_supervisor import LogLevel
 from app.services.ffmpeg_tools import (
     CaptureConfig,
+    CaptureInputCandidate,
     FfmpegNotFoundError,
     build_capture_input_candidates,
     list_camera_devices,
@@ -40,6 +41,51 @@ _GLOBAL_QUEUE: FrameQueue | None = None
 _GLOBAL_USERS = 0
 _GLOBAL_INPUT_TOKEN: str | None = None
 _GLOBAL_CONFIG: CaptureConfig | None = None
+
+
+def _dedupe_capture_configs(configs: list[CaptureConfig]) -> list[CaptureConfig]:
+    deduped: list[CaptureConfig] = []
+    seen: set[tuple[int, int, int, int | None, int | None, int | None]] = set()
+    for cfg in configs:
+        key = (cfg.width, cfg.height, cfg.fps, cfg.input_width, cfg.input_height, cfg.input_fps)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cfg)
+    return deduped
+
+
+def _build_capture_config_ladder(width: int, height: int, fps: int, *, is_virtual: bool) -> list[CaptureConfig]:
+    requested = CaptureConfig(width=width, height=height, fps=fps, input_width=width, input_height=height, input_fps=fps, label="requested")
+    implicit_defaults = CaptureConfig(width=width, height=height, fps=fps, input_width=None, input_height=None, input_fps=None, label="implicit-default")
+    fallbacks = [
+        CaptureConfig(width=width, height=height, fps=fps, input_width=None, input_height=None, input_fps=None, label="fallback-no-size-no-fps"),
+        CaptureConfig(width=width, height=height, fps=fps, input_width=1280, input_height=720, input_fps=30, label="fallback-1280x720@30"),
+        CaptureConfig(width=width, height=height, fps=fps, input_width=1280, input_height=720, input_fps=25, label="fallback-1280x720@25"),
+        CaptureConfig(width=width, height=height, fps=fps, input_width=640, input_height=480, input_fps=30, label="fallback-640x480@30"),
+        CaptureConfig(width=width, height=height, fps=fps, input_width=None, input_height=None, input_fps=None, label="fallback-camera-default"),
+    ]
+    ordered = [requested, *fallbacks] if is_virtual else [implicit_defaults, requested, *fallbacks]
+    return _dedupe_capture_configs(ordered)
+
+
+def _probe_physical_camera(candidate: CaptureInputCandidate, config: CaptureConfig) -> bool:
+    logging.info("[CAM_CAPTURE] preflight probe using implicit defaults for token=%r", candidate.token)
+    _camera_debug_dump(
+        "CAM_CAPTURE_PROBE",
+        f"token={candidate.token}\nreason={candidate.reason}\nconfig_label={config.label}\ninput_size={config.input_width}x{config.input_height}\ninput_fps={config.input_fps}",
+    )
+    probe_capture = None
+    try:
+        probe_capture, _ = _ensure_global_capture(candidate.token, config)
+        time.sleep(0.4)
+        if probe_capture.is_alive():
+            logging.info("[CAM_CAPTURE] preflight probe succeeded for token=%r", candidate.token)
+            return True
+        logging.warning("[CAM_CAPTURE] preflight probe failed for token=%r last_error=%s", candidate.token, probe_capture.last_error)
+        return False
+    finally:
+        _release_global_capture(clear_queue=True)
 
 
 def _camera_debug_enabled() -> bool:
@@ -200,7 +246,6 @@ class MonitorService(QThread):
                 width, height = get_profile_frame_size_fallback()
             fps = get_profile_fps(profile)
 
-            config = CaptureConfig(width=width, height=height, fps=fps)
             force_start = os.environ.get("CAMERA_FORCE_START", "").strip() in {"1", "true", "TRUE", "yes", "on"}
             verified_candidates = []
             for candidate in input_candidates:
@@ -216,24 +261,104 @@ class MonitorService(QThread):
             attempts = verified_candidates or input_candidates
             queue = None
             self._capture = None
+            selected_config = None
             for idx, candidate in enumerate(attempts, start=1):
-                logging.info("[CAM_CAPTURE] attempt %s using token=%r reason=%s", idx, candidate.token, candidate.reason)
-                _camera_debug_dump("CAM_CAPTURE_ATTEMPT", f"attempt={idx}\ntoken={candidate.token}\nreason={candidate.reason}")
-                cap, queue = _ensure_global_capture(candidate.token, config)
-                self._capture = cap
-                self._capture_acquired = True
-                time.sleep(0.6)
-                if cap.is_alive():
-                    logging.info("[CAM_CAPTURE] attempt %s succeeded", idx)
+                logging.info(
+                    "[CAM_CAPTURE] input attempt %s using token=%r reason=%s is_virtual=%s",
+                    idx,
+                    candidate.token,
+                    candidate.reason,
+                    candidate.is_virtual,
+                )
+                _camera_debug_dump(
+                    "CAM_CAPTURE_ATTEMPT",
+                    f"attempt={idx}\ntoken={candidate.token}\nreason={candidate.reason}\nis_virtual={candidate.is_virtual}",
+                )
+
+                if not candidate.is_virtual:
+                    probe_ok = _probe_physical_camera(
+                        candidate,
+                        CaptureConfig(
+                            width=width,
+                            height=height,
+                            fps=fps,
+                            input_width=None,
+                            input_height=None,
+                            input_fps=None,
+                            label="preflight-no-size-no-fps",
+                        ),
+                    )
+                    if not probe_ok:
+                        _camera_debug_dump("CAM_CAPTURE_PROBE_FAIL", f"attempt={idx}\ntoken={candidate.token}")
+
+                config_ladder = _build_capture_config_ladder(width, height, fps, is_virtual=candidate.is_virtual)
+                for cfg_idx, candidate_config in enumerate(config_ladder, start=1):
+                    logging.info(
+                        "[CAM_CAPTURE] input attempt %s config attempt %s label=%s input_size=%sx%s input_fps=%s",
+                        idx,
+                        cfg_idx,
+                        candidate_config.label,
+                        candidate_config.input_width,
+                        candidate_config.input_height,
+                        candidate_config.input_fps,
+                    )
+                    _camera_debug_dump(
+                        "CAM_CAPTURE_CONFIG_ATTEMPT",
+                        "\n".join(
+                            [
+                                f"input_attempt={idx}",
+                                f"config_attempt={cfg_idx}",
+                                f"token={candidate.token}",
+                                f"config_label={candidate_config.label}",
+                                f"input_size={candidate_config.input_width}x{candidate_config.input_height}",
+                                f"input_fps={candidate_config.input_fps}",
+                            ]
+                        ),
+                    )
+
+                    cap, queue = _ensure_global_capture(candidate.token, candidate_config)
+                    self._capture = cap
+                    self._capture_acquired = True
+                    time.sleep(0.6)
+                    if cap.is_alive():
+                        selected_config = candidate_config
+                        if candidate_config.label != "requested":
+                            self.status.emit(
+                                f"Camera fallback active: {candidate_config.label.replace('fallback-', '').replace('-', ' ')}"
+                            )
+                        logging.info(
+                            "[CAM_CAPTURE] capture succeeded with token=%r config_label=%s",
+                            candidate.token,
+                            candidate_config.label,
+                        )
+                        _camera_debug_dump(
+                            "CAM_CAPTURE_SUCCESS",
+                            f"token={candidate.token}\nconfig_label={candidate_config.label}\ninput_size={candidate_config.input_width}x{candidate_config.input_height}\ninput_fps={candidate_config.input_fps}",
+                        )
+                        break
+
+                    logging.warning(
+                        "[CAM_CAPTURE] config attempt failed token=%r config_label=%s last_error=%s",
+                        candidate.token,
+                        candidate_config.label,
+                        cap.last_error,
+                    )
+                    _camera_debug_dump(
+                        "CAM_CAPTURE_ATTEMPT_FAIL",
+                        f"input_attempt={idx}\nconfig_attempt={cfg_idx}\ntoken={candidate.token}\nconfig_label={candidate_config.label}\nlast_error={cap.last_error}",
+                    )
+                    _release_global_capture(clear_queue=True)
+                    self._capture_acquired = False
+                    self._capture = None
+
+                if self._capture and self._capture.is_alive():
                     break
-                _camera_debug_dump("CAM_CAPTURE_ATTEMPT_FAIL", f"attempt={idx}\ntoken={candidate.token}\nlast_error={cap.last_error}")
-                _release_global_capture(clear_queue=True)
-                self._capture_acquired = False
-                self._capture = None
             if not self._capture or not self._capture.is_alive() or queue is None:
                 self.status.emit("FFmpeg capture failed. Retry monitoring or reselect camera.")
                 self._state.mark_failed()
                 return
+            if selected_config and selected_config.label != "requested":
+                logging.info("[CAM_CAPTURE] final successful config=%s", selected_config.label)
 
             self._state.mark_running()
             self.state_changed.emit(MonitoringState.RUNNING.value)
