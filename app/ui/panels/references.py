@@ -128,7 +128,7 @@ class ReferencesPanel(QWidget):
         self.update_preview(app_state.selected_reference)
     
     def select_reference(self, ref_name):
-        # Toggle deselect if clicking the already-selected reference
+        # Intentional UX: clicking the active reference toggles it back to an unselected state
         if app_state.selected_reference == ref_name:
             app_state.selected_reference = None
 

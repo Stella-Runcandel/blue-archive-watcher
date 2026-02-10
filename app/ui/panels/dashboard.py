@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 
 from app.app_state import app_state
 from app.controllers.monitor_controller import MonitorController
+from app.services.ffmpeg_tools import list_video_devices
 from app.services.monitor_service import MonitorService
 from app.ui.theme import Styles
 from app.ui.widget_utils import disable_button_focus_rect, disable_widget_interaction, make_preview_label
@@ -228,6 +229,7 @@ class DashboardPanel(QWidget):
         self.camera_refresh_btn.clicked.connect(self.refresh_camera_devices)
         self.fps_spinbox.valueChanged.connect(self.on_fps_changed)
 
+        self.refresh_camera_devices()
         self.refresh()
 
     def select_profile(self):
@@ -365,9 +367,7 @@ class DashboardPanel(QWidget):
         update_profile_detection_threshold(profile, threshold)
 
     def update_camera_indices(self):
-        """Populate camera dropdown from cached enumeration."""
-        from app.workers.camera_workers import CameraProbeWorker
-
+        """Populate camera dropdown from FFmpeg DirectShow device enumeration."""
         profile = app_state.active_profile
         self.camera_combo.blockSignals(True)
         self.camera_combo.clear()
@@ -379,36 +379,24 @@ class DashboardPanel(QWidget):
             return
 
         current_device = get_profile_camera_device(profile)
-        if self._cached_available_camera_indices is None:
-            self.camera_combo.addItem("Scanning cameras...")
+        devices = list(self._cached_available_camera_indices or [])
+        if current_device and current_device not in devices:
+            devices.append(current_device)
+
+        unique_devices = list(dict.fromkeys(devices))
+        if not unique_devices:
+            self.camera_combo.addItem("No cameras found")
+            self.camera_combo.model().item(0).setEnabled(False)
             self.camera_combo.setEnabled(False)
-
-            if current_device:
-                self.camera_combo.addItem(str(current_device), current_device)
-                self.camera_combo.setCurrentIndex(1)
-
-            self._camera_probe_worker = CameraProbeWorker()
-            self._camera_probe_worker.cameraIndicesReady.connect(
-                self._on_camera_indices_ready
-            )
-            self._camera_probe_worker.start()
-
-            self.camera_combo.blockSignals(False)
-            return
-
-        options = list(self._cached_available_camera_indices)
-        if current_device and current_device not in options:
-            options.append(current_device)
-
-        for device in sorted(set(options)):
-            self.camera_combo.addItem(str(device), device)
-
-        selected = self.camera_combo.findData(current_device)
-        if selected >= 0:
-            self.camera_combo.setCurrentIndex(selected)
+        else:
+            for device in unique_devices:
+                self.camera_combo.addItem(str(device), device)
+            selected = self.camera_combo.findData(current_device)
+            if selected >= 0:
+                self.camera_combo.setCurrentIndex(selected)
+            self.camera_combo.setEnabled(True)
 
         self.camera_combo.blockSignals(False)
-        self.camera_combo.setEnabled(self.camera_combo.count() > 0)
         self.camera_refresh_btn.setEnabled(True)
 
     def on_camera_changed(self, index):
@@ -510,14 +498,9 @@ class DashboardPanel(QWidget):
             )
         )
 
-    def _on_camera_indices_ready(self, indices):
-        """Handle FFmpeg device enumeration completion."""
-        self._cached_available_camera_indices = indices
-        self.update_camera_indices()
-
     def refresh_camera_devices(self):
         """Force camera enumeration refresh."""
-        self._cached_available_camera_indices = None
+        self._cached_available_camera_indices = list_video_devices()
         self.update_camera_indices()
 
     def _on_snapshot_ready(self, image):

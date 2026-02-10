@@ -92,6 +92,38 @@ class UiBehaviorTests(unittest.TestCase):
         button_texts = [btn.text() for btn in panel.findChildren(self.QPushButton)]
         self.assertTrue(any("ref.png" in text for text in button_texts))
 
+
+    def test_reference_click_toggles_selection(self):
+        """Clicking the selected reference again should clear selection."""
+        self.profiles.create_profile("Gamma")
+        self.app_state.active_profile = "Gamma"
+
+        frame_dir = Path("Data") / "Profiles" / "Gamma" / "frames"
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        frame_path = frame_dir / "frame.png"
+        frame_path.write_bytes(b"fake")
+        self.storage.add_frame("Gamma", frame_path.name, str(frame_path))
+
+        ref_dir = Path("Data") / "Profiles" / "Gamma" / "references"
+        ref_dir.mkdir(parents=True, exist_ok=True)
+        ref_path = ref_dir / "ref.png"
+        ref_path.write_bytes(b"fake")
+        self.storage.add_reference("Gamma", ref_path.name, str(ref_path), frame_path.name)
+
+        panel = self.ReferencesPanel(DummyNav())
+        select_button = next(
+            btn for btn in panel.findChildren(self.QPushButton)
+            if btn.text().startswith("ref.png")
+        )
+
+        select_button.click()
+        self.assertEqual(self.app_state.selected_reference, "ref.png")
+        self.assertEqual(panel.info_label.text(), "Selected reference: ref.png")
+
+        select_button.click()
+        self.assertIsNone(self.app_state.selected_reference)
+        self.assertEqual(panel.info_label.text(), "Selected reference: None")
+
     def test_dashboard_scroll_layout(self):
         """Dashboard panel uses scroll area for resizable layouts."""
         panel = self.DashboardPanel(DummyNav())
