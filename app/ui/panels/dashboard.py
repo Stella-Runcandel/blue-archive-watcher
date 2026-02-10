@@ -55,7 +55,7 @@ class DashboardPanel(QWidget):
         self.nav = nav
         self.profile_preview_bytes = None
         self._frozen_frame = None
-        self._cached_available_camera_indices = None
+        self._cached_available_camera_devices = None
 
         self.profile_label = QLabel("Profile: None")
         self.frame_label = QLabel("Selected Frame: None")
@@ -317,7 +317,7 @@ class DashboardPanel(QWidget):
         self.unfreeze_btn.setEnabled(True)
         self.update_detection_strictness()
         self.update_fps_setting()
-        self.update_camera_indices()
+        self.update_camera_devices()
         self.update_profile_preview()
 
     def update_detection_strictness(self):
@@ -354,7 +354,7 @@ class DashboardPanel(QWidget):
         _, threshold = self.STRICTNESS_OPTIONS[index]
         update_profile_detection_threshold(app_state.active_profile, threshold)
 
-    def update_camera_indices(self):
+    def update_camera_devices(self):
         profile = app_state.active_profile
         self.camera_combo.blockSignals(True)
         self.camera_combo.clear()
@@ -365,7 +365,7 @@ class DashboardPanel(QWidget):
             return
 
         current_device = get_profile_camera_device(profile)
-        devices = list(self._cached_available_camera_indices or [])
+        devices = list(self._cached_available_camera_devices or [])
         if current_device and current_device not in devices:
             devices.append(current_device)
 
@@ -447,8 +447,8 @@ class DashboardPanel(QWidget):
         self.update_camera_preview()
 
     def refresh_camera_devices(self):
-        self._cached_available_camera_indices = list_video_devices(force_refresh=True)
-        self.update_camera_indices()
+        self._cached_available_camera_devices = list_video_devices(force_refresh=True)
+        self.update_camera_devices()
 
     def update_camera_preview(self):
         if not self.isVisible():
