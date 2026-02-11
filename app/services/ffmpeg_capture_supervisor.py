@@ -9,6 +9,7 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
+from typing import Callable
 
 from app.services.ffmpeg_tools import CaptureConfig, FfmpegNotFoundError, build_ffmpeg_capture_command
 from app.services.frame_bus import FramePacket, FrameQueue
@@ -22,6 +23,9 @@ class LogLevel(str, Enum):
 
 @dataclass(frozen=True)
 class FfmpegLogEvent:
+    timestamp: float
+    pipeline: str
+    camera: str
     level: LogLevel
     message: str
 
@@ -38,6 +42,7 @@ class FfmpegCaptureSupervisor:
         *,
         allow_input_tuning: bool = True,
         pipeline: str = "monitoring",
+        log_sink: Callable[[dict], None] | None = None,
     ):
         self.input_token = input_token
         self.config = config
@@ -45,6 +50,10 @@ class FfmpegCaptureSupervisor:
         self.frame_queue = frame_queue
         self.pipeline = pipeline
         self.instance_id = next(_INSTANCE_IDS)
+        self._log_sink = log_sink
+        self._last_log_message: str | None = None
+        self._last_log_level: LogLevel | None = None
+        self._last_log_repeat = 0
         self.process: subprocess.Popen | None = None
         self._stop = threading.Event()
         self._reader_thread: threading.Thread | None = None
@@ -105,19 +114,57 @@ class FfmpegCaptureSupervisor:
             if level == LogLevel.ERROR:
                 self.last_error = text
 
+    def _safe_emit(self, payload: dict) -> None:
+        if not self._log_sink:
+            return
+        try:
+            self._log_sink(payload)
+        except Exception:
+            # Logging must never crash data pipelines.
+            pass
+
     def _emit_log(self, level: LogLevel, message: str) -> None:
-        event = FfmpegLogEvent(level=level, message=message)
+        if message == self._last_log_message and level == self._last_log_level:
+            self._last_log_repeat += 1
+            if self._last_log_repeat % 10 != 0:
+                return
+            message = f"{message} (repeated x{self._last_log_repeat})"
+        else:
+            self._last_log_message = message
+            self._last_log_level = level
+            self._last_log_repeat = 1
+
+        now = time.time()
+        event = FfmpegLogEvent(
+            timestamp=now,
+            pipeline=self.pipeline,
+            camera=self.input_token,
+            level=level,
+            message=message,
+        )
         try:
             self.log_events.put_nowait(event)
         except queue.Full:
             pass
-        getattr(logging, level.value.lower())(
-            "[CAM_CAPTURE] id=%s pipeline=%s camera=%r %s",
-            self.instance_id,
-            self.pipeline,
-            self.input_token,
-            message,
-        )
+
+        payload = {
+            "ts": now,
+            "pipeline": self.pipeline,
+            "camera": self.input_token,
+            "severity": level.value,
+            "message": message,
+        }
+        self._safe_emit(payload)
+        try:
+            getattr(logging, level.value.lower())(
+                "[CAM_CAPTURE] id=%s pipeline=%s camera=%r %s",
+                self.instance_id,
+                self.pipeline,
+                self.input_token,
+                message,
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _classify_log(text: str) -> LogLevel:
@@ -150,8 +197,18 @@ class FfmpegCaptureSupervisor:
             self._reader_thread.join(timeout=timeout)
         if self._stderr_thread:
             self._stderr_thread.join(timeout=timeout)
+        self._safe_emit({
+            "ts": time.time(),
+            "pipeline": self.pipeline,
+            "camera": self.input_token,
+            "severity": LogLevel.INFO.value,
+            "message": "capture process stopped",
+        })
         if self.process:
-            logging.info("[CAM_CAPTURE] stop id=%s pipeline=%s camera=%r exit=%s", self.instance_id, self.pipeline, self.input_token, self.process.returncode)
+            try:
+                logging.info("[CAM_CAPTURE] stop id=%s pipeline=%s camera=%r exit=%s", self.instance_id, self.pipeline, self.input_token, self.process.returncode)
+            except Exception:
+                pass
 
     def is_alive(self) -> bool:
         return bool(self.process and self.process.poll() is None)

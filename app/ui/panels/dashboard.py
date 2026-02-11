@@ -230,10 +230,11 @@ class DashboardPanel(QWidget):
         self.fps_spinbox.valueChanged.connect(self.on_fps_changed)
 
         self.preview_timer = QTimer(self)
-        self.preview_timer.setInterval(120)
+        self.preview_timer.setInterval(100)
         self.preview_timer.timeout.connect(self.update_camera_preview)
         self.preview_timer.start()
 
+        self._preview_failure_reason = "Camera preview unavailable"
         self.refresh_camera_devices()
         self.refresh()
         self.ensure_preview_capture()
@@ -416,6 +417,7 @@ class DashboardPanel(QWidget):
         clean_name = str(device_name)
         logging.info("[CAM_UI] camera changed index=%s display=%r stored=%r", index, display_text, clean_name)
         set_profile_camera_device(app_state.active_profile, clean_name)
+        self._preview_failure_reason = "Camera selection changed"
         release_preview_capture()
         self.ensure_preview_capture()
 
@@ -514,12 +516,20 @@ class DashboardPanel(QWidget):
         width, height = get_profile_frame_size(profile)
         if not width or not height:
             width, height = get_profile_frame_size_fallback()
-        fps = get_profile_fps(profile)
+        # Preview is intentionally downscaled to widget bounds to reduce CPU/memory churn.
+        preview_w = max(320, self.camera_preview.width())
+        preview_h = max(180, self.camera_preview.height())
+        width = min(width, preview_w)
+        height = min(height, preview_h)
+        fps = min(15, max(10, get_profile_fps(profile)))
         ok, message = start_preview_for_selected_camera(selected_camera, width, height, fps)
         if not ok and message and "debounced" not in message and "paused" not in message:
+            self._preview_failure_reason = message
             self.camera_preview.setPixmap(QPixmap())
             self.camera_preview.setText(message)
             self.status_label.setText(message)
+        elif ok:
+            self._preview_failure_reason = ""
 
     def update_camera_preview(self):
         if not self.isVisible():
@@ -528,7 +538,7 @@ class DashboardPanel(QWidget):
         frame_item = self._frozen_frame or get_latest_preview_frame() or get_latest_global_frame()
         if frame_item is None:
             self.camera_preview.setPixmap(QPixmap())
-            self.camera_preview.setText("Camera preview unavailable")
+            self.camera_preview.setText(self._preview_failure_reason or "Camera preview unavailable")
             return
 
         profile = app_state.active_profile
@@ -544,13 +554,13 @@ class DashboardPanel(QWidget):
             self.camera_preview.setText("Preview size mismatch")
             return
 
-        rgb = frame.reshape((height, width, 3))[:, :, ::-1].copy()
+        bgr = frame.reshape((height, width, 3))
         image = QImage(
-            rgb.data,
+            bgr.data,
             width,
             height,
             width * 3,
-            QImage.Format.Format_RGB888,
+            QImage.Format.Format_BGR888,
         ).copy()
         pixmap = QPixmap.fromImage(image)
         self.camera_preview.setPixmap(

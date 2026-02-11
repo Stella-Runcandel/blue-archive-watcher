@@ -71,6 +71,9 @@ def _reset_globals(monitor_service):
     monitor_service._PREVIEW_CONFIG = None
     monitor_service._PREVIEW_PAUSED_FOR_MONITORING = False
     monitor_service._PREVIEW_LAST_RESTART_AT = 0.0
+    monitor_service._ACTIVE_OWNER_PIPELINE = None
+    monitor_service._ACTIVE_CAMERA_TOKEN = None
+    monitor_service._LAST_CAMERA_RELEASE_AT = 0.0
 
 
 @unittest.skipUnless(CV2_AVAILABLE, "OpenCV unavailable in test environment")
@@ -164,6 +167,33 @@ class MonitorCaptureTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertEqual(reason, "Preview paused while monitoring is active")
 
+
+    def test_preview_blocked_when_monitoring_owns_camera(self):
+        config = CaptureConfig(width=1280, height=720, fps=30)
+        self.monitor_service._ACTIVE_OWNER_PIPELINE = "monitoring"
+        self.monitor_service._ACTIVE_CAMERA_TOKEN = "camera-1"
+        with mock.patch.object(self.monitor_service, "FfmpegCapture", DummyCapture):
+            ok, reason = self.monitor_service._ensure_preview_capture("camera-1", config, allow_input_tuning=False)
+        self.assertFalse(ok)
+        self.assertIn("owned by monitoring", reason)
+
+    def test_virtual_preview_uses_single_retry(self):
+        calls = {"count": 0}
+
+        def side_effect(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return False, "Preview failed: device busy"
+            return True, None
+
+        with mock.patch.object(self.monitor_service, "build_capture_input_candidates", return_value=[SimpleNamespace(token="video=cam-a", is_virtual=True)]):
+            with mock.patch.object(self.monitor_service, "_ensure_preview_capture", side_effect=side_effect):
+                with mock.patch.object(self.monitor_service.time, "sleep", return_value=None):
+                    ok, reason = self.monitor_service.start_preview_for_selected_camera("cam-a", 640, 480, 30)
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+        self.assertEqual(calls["count"], 2)
+
     def _fail_capture_once(self, input_token, config, *, allow_input_tuning):
         queue = self.monitor_service.FrameQueue(maxlen=2)
         cap = FailingCapture(input_token, config, queue, allow_input_tuning=allow_input_tuning)
@@ -196,7 +226,7 @@ class MonitorCaptureTests(unittest.TestCase):
             service.run()
 
         retry_msgs = [m for m in messages if "Monitoring retrying" in m]
-        self.assertEqual(len(retry_msgs), 2)
+        self.assertEqual(len(retry_msgs), 1)
         self.assertTrue(any(m.startswith("Monitoring failed:") for m in messages))
         self.assertIn("FAILED", states)
         self.assertGreaterEqual(release_mock.call_count, 3)

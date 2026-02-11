@@ -44,15 +44,65 @@ _PREVIEW_INPUT_TOKEN: str | None = None
 _PREVIEW_CONFIG: CaptureConfig | None = None
 _PREVIEW_PAUSED_FOR_MONITORING = False
 _PREVIEW_LAST_RESTART_AT = 0.0
-_PREVIEW_RESTART_DEBOUNCE_SEC = 0.5
+_PREVIEW_RESTART_DEBOUNCE_SEC = 1.5
+_PREVIEW_MAX_RETRIES = 2
+_CAMERA_REOPEN_COOLDOWN_SEC = 0.4
 
+_CAMERA_OWNER_LOCK = threading.Lock()
+_ACTIVE_OWNER_PIPELINE: str | None = None
+_ACTIVE_CAMERA_TOKEN: str | None = None
+_LAST_CAMERA_RELEASE_AT = 0.0
+
+
+
+
+def _emit_capture_event(payload: dict) -> None:
+    try:
+        logging.getLogger("camera.capture").info("event=%s", payload)
+    except Exception:
+        # Logging must be best-effort and never break capture control flow.
+        pass
+
+
+def _acquire_camera_owner(pipeline: str, input_token: str) -> tuple[bool, str | None]:
+    """Allow only one FFmpeg owner (preview OR monitoring) per camera at a time."""
+    global _ACTIVE_OWNER_PIPELINE, _ACTIVE_CAMERA_TOKEN
+    with _CAMERA_OWNER_LOCK:
+        if _ACTIVE_OWNER_PIPELINE and (_ACTIVE_OWNER_PIPELINE != pipeline or _ACTIVE_CAMERA_TOKEN != input_token):
+            return False, f"Camera is currently owned by {_ACTIVE_OWNER_PIPELINE}"
+        _ACTIVE_OWNER_PIPELINE = pipeline
+        _ACTIVE_CAMERA_TOKEN = input_token
+        return True, None
+
+
+def _release_camera_owner(pipeline: str, input_token: str) -> None:
+    global _ACTIVE_OWNER_PIPELINE, _ACTIVE_CAMERA_TOKEN, _LAST_CAMERA_RELEASE_AT
+    with _CAMERA_OWNER_LOCK:
+        if _ACTIVE_OWNER_PIPELINE == pipeline and _ACTIVE_CAMERA_TOKEN == input_token:
+            _ACTIVE_OWNER_PIPELINE = None
+            _ACTIVE_CAMERA_TOKEN = None
+            _LAST_CAMERA_RELEASE_AT = time.time()
+
+
+def _wait_camera_reopen_cooldown(stop_event: threading.Event | None = None) -> bool:
+    """Small deterministic cooldown avoids DirectShow thrash on rapid close/open."""
+    with _CAMERA_OWNER_LOCK:
+        remaining = _CAMERA_REOPEN_COOLDOWN_SEC - (time.time() - _LAST_CAMERA_RELEASE_AT)
+    if remaining <= 0:
+        return True
+    if stop_event:
+        return not stop_event.wait(remaining)
+    time.sleep(remaining)
+    return True
 
 def _build_monitoring_config_ladder(width: int, height: int, fps: int, *, is_virtual: bool) -> list[CaptureConfig]:
     requested = CaptureConfig(width=width, height=height, fps=fps, input_width=width, input_height=height, input_fps=fps, label="requested")
     implicit = CaptureConfig(width=width, height=height, fps=fps, input_width=None, input_height=None, input_fps=None, label="implicit-default")
+    # Virtual cameras (OBS/Broadcast/etc.) are unstable when forced at input open time.
+    # Keep DirectShow input negotiation implicit and only scale/rate-limit on output.
     if is_virtual:
-        return [requested, implicit]
-    return [implicit]
+        return [implicit, implicit]
+    return [requested, implicit]
 
 
 def _ensure_global_capture(
@@ -76,6 +126,13 @@ def _ensure_global_capture(
             _GLOBAL_QUEUE = None
             _GLOBAL_USERS = 0
 
+        acquired, reason = _acquire_camera_owner("monitoring", input_token)
+        if not acquired:
+            raise RuntimeError(reason or "camera ownership conflict")
+        if not _wait_camera_reopen_cooldown():
+            _release_camera_owner("monitoring", input_token)
+            raise RuntimeError("camera reopen cooldown interrupted")
+
         _GLOBAL_QUEUE = FrameQueue(maxlen=8)
         _GLOBAL_CAPTURE = FfmpegCapture(
             input_token=input_token,
@@ -83,6 +140,7 @@ def _ensure_global_capture(
             frame_queue=_GLOBAL_QUEUE,
             allow_input_tuning=allow_input_tuning,
             pipeline="monitoring",
+            log_sink=_emit_capture_event,
         )
         _GLOBAL_CAPTURE.start()
         _GLOBAL_INPUT_TOKEN = input_token
@@ -101,6 +159,7 @@ def _release_global_capture(clear_queue: bool = False) -> None:
             return
         if _GLOBAL_CAPTURE:
             _GLOBAL_CAPTURE.stop()
+            _release_camera_owner("monitoring", _GLOBAL_INPUT_TOKEN or "")
         if _GLOBAL_QUEUE and clear_queue:
             _GLOBAL_QUEUE.clear(stale=True)
         _GLOBAL_CAPTURE = None
@@ -124,17 +183,27 @@ def _ensure_preview_capture(input_token: str, config: CaptureConfig, *, allow_in
 
         if _PREVIEW_CAPTURE:
             _PREVIEW_CAPTURE.stop()
+            _release_camera_owner("preview", _PREVIEW_INPUT_TOKEN or "")
         if _PREVIEW_QUEUE:
             _PREVIEW_QUEUE.clear(stale=True)
 
+        acquired, reason = _acquire_camera_owner("preview", input_token)
+        if not acquired:
+            return False, reason
+
         _PREVIEW_LAST_RESTART_AT = now
-        _PREVIEW_QUEUE = FrameQueue(maxlen=4)
+        if not _wait_camera_reopen_cooldown():
+            _release_camera_owner("preview", input_token)
+            return False, "Preview cooldown interrupted"
+
+        _PREVIEW_QUEUE = FrameQueue(maxlen=3)
         _PREVIEW_CAPTURE = FfmpegCapture(
             input_token=input_token,
             config=config,
             frame_queue=_PREVIEW_QUEUE,
             allow_input_tuning=allow_input_tuning,
             pipeline="preview",
+            log_sink=_emit_capture_event,
         )
         _PREVIEW_CAPTURE.start()
         _PREVIEW_INPUT_TOKEN = input_token
@@ -147,6 +216,7 @@ def release_preview_capture() -> None:
     with _PREVIEW_LOCK:
         if _PREVIEW_CAPTURE:
             _PREVIEW_CAPTURE.stop()
+            _release_camera_owner("preview", _PREVIEW_INPUT_TOKEN or "")
         if _PREVIEW_QUEUE:
             _PREVIEW_QUEUE.clear(stale=True)
         _PREVIEW_CAPTURE = None
@@ -178,24 +248,40 @@ def start_preview_for_selected_camera(selected_display_name: str, width: int, he
         return False, "Preview failed: selected camera not found"
 
     candidate = candidates[0]
-    config = _build_monitoring_config_ladder(width, height, fps, is_virtual=candidate.is_virtual)[0]
-    try:
-        started, skip_reason = _ensure_preview_capture(candidate.token, config, allow_input_tuning=candidate.is_virtual)
-    except FfmpegNotFoundError as exc:
-        return False, f"Preview failed: FFmpeg not found ({exc})"
-    except Exception as exc:
-        logging.warning("[CAM_PREVIEW] failed to start", exc_info=True)
-        return False, f"Preview failed: {exc}"
+    configs = _build_monitoring_config_ladder(width, height, fps, is_virtual=candidate.is_virtual)
+    attempts = min(_PREVIEW_MAX_RETRIES, len(configs))
+    last_reason = "unknown preview failure"
 
-    if not started:
-        return False, skip_reason
+    for attempt in range(1, attempts + 1):
+        config = configs[attempt - 1]
+        try:
+            started, skip_reason = _ensure_preview_capture(candidate.token, config, allow_input_tuning=not candidate.is_virtual)
+        except FfmpegNotFoundError as exc:
+            return False, f"Preview failed: FFmpeg not found ({exc})"
+        except Exception as exc:
+            logging.warning("[CAM_PREVIEW] failed to start", exc_info=True)
+            return False, f"Preview failed: {exc}"
 
-    time.sleep(0.15)
-    with _PREVIEW_LOCK:
-        if _PREVIEW_CAPTURE and _PREVIEW_CAPTURE.is_alive():
-            return True, None
-        reason = _PREVIEW_CAPTURE.last_error if _PREVIEW_CAPTURE else "ffmpeg exited"
-    return False, f"Preview failed: {reason or 'ffmpeg exited'}"
+        if not started:
+            last_reason = skip_reason or last_reason
+            if "owned by" in (skip_reason or ""):
+                return False, skip_reason
+            if attempt < attempts:
+                time.sleep(_CAMERA_REOPEN_COOLDOWN_SEC)
+            continue
+
+        time.sleep(0.15)
+        with _PREVIEW_LOCK:
+            if _PREVIEW_CAPTURE and _PREVIEW_CAPTURE.is_alive():
+                return True, None
+            reason = _PREVIEW_CAPTURE.last_error if _PREVIEW_CAPTURE else "ffmpeg exited"
+            last_reason = reason or "ffmpeg exited"
+
+        if attempt < attempts:
+            release_preview_capture()
+            time.sleep(_CAMERA_REOPEN_COOLDOWN_SEC)
+
+    return False, f"Preview failed: {last_reason}"
 
 
 def get_latest_preview_frame():
@@ -306,7 +392,7 @@ class MonitorService(QThread):
             fps = get_profile_fps(profile)
 
             configs = _build_monitoring_config_ladder(width, height, fps, is_virtual=candidate.is_virtual)
-            max_retries = 3
+            max_retries = 2
             queue = None
             failure_reason = "unknown capture failure"
 
@@ -316,14 +402,15 @@ class MonitorService(QThread):
                 config = configs[min(attempt - 1, len(configs) - 1)]
                 if attempt > 1:
                     self.status.emit(f"Monitoring retrying ({attempt}/{max_retries})")
-                    if self._stop_event.wait(0.3):
+                    # One delayed retry limits thrash while handling transient virtual-cam startup failures.
+                    if self._stop_event.wait(_CAMERA_REOPEN_COOLDOWN_SEC):
                         break
                 logging.info("[CAM_CAPTURE] start attempt=%s/%s camera=%r config=%s", attempt, max_retries, candidate.token, config.label)
 
                 cap, queue = _ensure_global_capture(
                     candidate.token,
                     config,
-                    allow_input_tuning=candidate.is_virtual,
+                    allow_input_tuning=not candidate.is_virtual,
                 )
                 self._capture = cap
                 self._capture_acquired = True

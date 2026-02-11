@@ -14,6 +14,11 @@ from app.services.camera_enumerator import CameraDevice, append_camera_debug_log
 LOG = logging.getLogger(__name__)
 
 
+def ffmpeg_debug_enabled() -> bool:
+    """Enable verbose ffmpeg logs only when explicitly requested."""
+    return os.environ.get("FFMPEG_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 class FfmpegNotFoundError(RuntimeError):
     """Raised when FFmpeg cannot be located."""
 
@@ -174,16 +179,21 @@ def resolve_camera_device_token(selected_display_name: str, force_refresh: bool 
 
 
 def build_ffmpeg_capture_command(input_token: str, config: CaptureConfig, *, allow_input_tuning: bool = True):
+    ffmpeg_loglevel = "verbose" if ffmpeg_debug_enabled() else "warning"
     cmd = [
         resolve_ffmpeg_path(),
         "-hide_banner",
         "-nostdin",
         "-loglevel",
-        "verbose",
+        ffmpeg_loglevel,
         "-f",
         "dshow",
         "-rtbufsize",
-        "512M",
+        "64M",
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
     ]
     if allow_input_tuning and config.input_width is not None and config.input_height is not None:
         cmd.extend(["-video_size", f"{config.input_width}x{config.input_height}"])
