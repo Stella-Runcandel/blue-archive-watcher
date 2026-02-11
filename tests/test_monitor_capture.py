@@ -210,6 +210,74 @@ class MonitorCaptureTests(unittest.TestCase):
         cap = FailingCapture(input_token, config, queue, allow_input_tuning=allow_input_tuning)
         return cap, queue
 
+
+    def test_monitoring_caps_resolution_to_1280x720(self):
+        service = self.monitor_service.MonitorService()
+        seen = {}
+
+        def fail_once(input_token, config, *, allow_input_tuning):
+            seen["config"] = config
+            return self._fail_capture_once(input_token, config, allow_input_tuning=allow_input_tuning)
+
+        with (
+            mock.patch.object(self.monitor_service, "pause_preview_for_monitoring"),
+            mock.patch.object(self.monitor_service, "resume_preview_after_monitoring"),
+            mock.patch.object(self.monitor_service, "get_profile_dirs"),
+            mock.patch.object(self.monitor_service, "get_profile_camera_device", return_value="cam-a"),
+            mock.patch.object(self.monitor_service, "get_profile_frame_size", return_value=(1920, 1080)),
+            mock.patch.object(self.monitor_service, "get_profile_fps", return_value=30),
+            mock.patch.object(self.monitor_service, "build_capture_input_candidates", return_value=[SimpleNamespace(token="video=cam-a", is_virtual=False)]),
+            mock.patch.object(self.monitor_service, "_ensure_global_capture", side_effect=fail_once),
+            mock.patch.object(self.monitor_service, "_release_global_capture"),
+            mock.patch.object(self.monitor_service.time, "sleep", return_value=None),
+            mock.patch.object(self.monitor_service.time, "time", side_effect=[0.0, 3.0, 4.0, 7.0, 8.0, 11.0, 12.0]),
+        ):
+            from app.app_state import app_state
+
+            app_state.active_profile = "alpha"
+            app_state.selected_reference = "ref"
+            service.run()
+
+        self.assertEqual(seen["config"].width, 1280)
+        self.assertEqual(seen["config"].height, 720)
+        self.assertEqual(seen["config"].input_width, 1280)
+        self.assertEqual(seen["config"].input_height, 720)
+
+    def test_processing_loop_uses_resolved_monitor_fps(self):
+        service = self.monitor_service.MonitorService()
+        service._monitor_fps = 20
+
+        class BurstQueue:
+            dropped_frames = 0
+            maxlen = 2
+
+            def __init__(self):
+                self._calls = 0
+
+            def get(self, timeout=0.5):
+                self._calls += 1
+                if self._calls <= 2:
+                    return self.monitor_service.FramePacket(1.0, b"\x00" * (2 * 2 * 3))
+                service._stop_event.set()
+                return None
+
+            def size(self):
+                return 0
+
+        queue = BurstQueue()
+        queue.monitor_service = self.monitor_service
+
+        with (
+            mock.patch.object(self.monitor_service.app_state, "selected_reference", "ref"),
+            mock.patch.object(service._metrics, "on_frame"),
+            mock.patch.object(service._detection_consumer, "is_paused", return_value=False),
+            mock.patch.object(self.monitor_service.time, "time", side_effect=[0.0, 0.02, 0.02]),
+            mock.patch.object(self.monitor_service.dect, "evaluate_frame", return_value=SimpleNamespace(confidence=0.5, matched=False, timestamp=0.0)) as eval_mock,
+        ):
+            service._processing_loop("alpha", queue, 2, 2)
+
+        self.assertEqual(eval_mock.call_count, 1)
+
     def test_monitoring_retries_limited_and_reports_failure(self):
         service = self.monitor_service.MonitorService()
         messages = []

@@ -137,19 +137,32 @@ def _ensure_global_capture(
             raise RuntimeError("camera reopen cooldown interrupted")
 
         _GLOBAL_QUEUE = FrameQueue(maxlen=8)
-        _GLOBAL_CAPTURE = FfmpegCapture(
-            input_token=input_token,
-            config=config,
-            frame_queue=_GLOBAL_QUEUE,
-            allow_input_tuning=allow_input_tuning,
-            pipeline="monitoring",
-            log_sink=_emit_capture_event,
-        )
-        _GLOBAL_CAPTURE.start()
-        _GLOBAL_INPUT_TOKEN = input_token
-        _GLOBAL_CONFIG = config
-        _GLOBAL_USERS = 1
-        return _GLOBAL_CAPTURE, _GLOBAL_QUEUE
+        try:
+            _GLOBAL_CAPTURE = FfmpegCapture(
+                input_token=input_token,
+                config=config,
+                frame_queue=_GLOBAL_QUEUE,
+                allow_input_tuning=allow_input_tuning,
+                pipeline="monitoring",
+                log_sink=_emit_capture_event,
+            )
+            _GLOBAL_CAPTURE.start()
+            _GLOBAL_INPUT_TOKEN = input_token
+            _GLOBAL_CONFIG = config
+            _GLOBAL_USERS = 1
+            return _GLOBAL_CAPTURE, _GLOBAL_QUEUE
+        except Exception:
+            if _GLOBAL_CAPTURE:
+                _GLOBAL_CAPTURE.stop()
+            _GLOBAL_CAPTURE = None
+            if _GLOBAL_QUEUE:
+                _GLOBAL_QUEUE.clear(stale=True)
+            _GLOBAL_QUEUE = None
+            _GLOBAL_USERS = 0
+            _GLOBAL_INPUT_TOKEN = None
+            _GLOBAL_CONFIG = None
+            _release_camera_owner("monitoring", input_token)
+            raise
 
 
 def _release_global_capture(clear_queue: bool = False) -> None:
@@ -407,6 +420,7 @@ class MonitorService(QThread):
         self._state = MonitoringStateMachine()
         self._detection_consumer = DetectionConsumer()
         self._metrics = MetricsConsumer()
+        self._monitor_fps = 1
 
     def current_state(self) -> MonitoringState:
         return self._state.state
@@ -463,7 +477,10 @@ class MonitorService(QThread):
             width, height = get_profile_frame_size(profile)
             if not width or not height:
                 width, height = get_profile_frame_size_fallback()
+            width = min(width or 1280, 1280)
+            height = min(height or 720, 720)
             fps = get_profile_fps(profile)
+            self._monitor_fps = max(1, fps)
 
             configs = _build_monitoring_config_ladder(width, height, fps, is_virtual=candidate.is_virtual)
             max_retries = 2
@@ -573,12 +590,22 @@ class MonitorService(QThread):
         last_confidence = 0.0
         selected_reference = app_state.selected_reference
         last_detection_time = None
-        target_frame_time = 1.0 / max(1, self.config.fps)
+        target_frame_time = 1.0 / max(1, self._monitor_fps)
+        last_processed_at = 0.0
 
         while not self._stop_event.is_set():
-            loop_started = time.time()
             pkt = queue.get(timeout=0.5)
             if pkt is None:
+                continue
+
+            now = time.time()
+            if last_processed_at:
+                delta = now - last_processed_at
+                if delta < target_frame_time:
+                    continue
+            last_processed_at = now
+
+            if not hasattr(pkt, "payload"):
                 continue
 
             self._metrics.on_frame()
@@ -607,7 +634,6 @@ class MonitorService(QThread):
                     logging.exception("Alert backend failure")
 
             processed += 1
-            now = time.time()
             if now - start >= 5:
                 self.metrics.emit(
                     {
@@ -623,11 +649,6 @@ class MonitorService(QThread):
                 )
                 processed = 0
                 start = now
-
-            elapsed = time.time() - loop_started
-            sleep_time = target_frame_time - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
 
     def stop(self, clear_queue: bool = False, *, emit_status: bool = True):
         if self._state.state in (MonitoringState.IDLE, MonitoringState.STOPPING):

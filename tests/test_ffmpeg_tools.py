@@ -104,8 +104,8 @@ class FfmpegToolsTests(unittest.TestCase):
             cmd = ffmpeg_tools.build_ffmpeg_capture_command("video=HD Webcam", config)
         self.assertNotIn("-video_size", cmd)
         self.assertNotIn("-framerate", cmd)
-        self.assertIn("-s", cmd)
-        self.assertIn("1280x720", cmd)
+        self.assertIn("-vf", cmd)
+        self.assertIn("scale=1280:720:flags=fast_bilinear", cmd)
 
     @patch(
         "app.services.ffmpeg_tools.list_camera_devices",

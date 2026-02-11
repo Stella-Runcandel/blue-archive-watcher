@@ -209,10 +209,7 @@ def build_ffmpeg_capture_command(
         cmd.extend(["-framerate", str(config.input_fps)])
 
     cmd.extend(["-i", input_token])
-    if pipeline == "preview":
-        cmd.extend(["-vf", f"scale={config.width}:{config.height}:flags=fast_bilinear"])
-    else:
-        cmd.extend(["-s", f"{config.width}x{config.height}"])
+    cmd.extend(["-vf", f"scale={config.width}:{config.height}:flags=fast_bilinear"])
     cmd.extend([
         "-r",
         str(config.fps),
