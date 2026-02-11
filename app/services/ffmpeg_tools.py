@@ -258,3 +258,37 @@ def capture_single_frame(device_name: str, width: int, height: int, fps: int):
         append_camera_debug_log("CAM_CAPTURE_SNAPSHOT_STDERR", stderr)
         raise RuntimeError(stderr.strip() or "snapshot failed")
     return result.stdout
+
+
+def capture_single_frame_by_token(input_token: str, *, width: int | None = None, height: int | None = None):
+    """Capture exactly one raw BGR frame from a resolved dshow token."""
+    args = [
+        resolve_ffmpeg_path(),
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-f",
+        "dshow",
+        "-i",
+        input_token,
+    ]
+    if width and height:
+        args.extend(["-s", f"{int(width)}x{int(height)}"])
+    args.extend([
+        "-frames:v",
+        "1",
+        "-pix_fmt",
+        "bgr24",
+        "-f",
+        "rawvideo",
+        "pipe:1",
+    ])
+    LOG.info("[CAM_CAPTURE] one-shot snapshot command: %s", args)
+    append_camera_debug_log("CAM_CAPTURE_SNAPSHOT_ONESHOT_CMD", " ".join(args))
+    result = _run_ffmpeg_command(args, timeout=10, text=False)
+    if result.returncode != 0:
+        stderr = result.stderr.decode(errors="ignore") if result.stderr else ""
+        append_camera_debug_log("CAM_CAPTURE_SNAPSHOT_ONESHOT_STDERR", stderr)
+        raise RuntimeError(stderr.strip() or "snapshot failed")
+    return result.stdout

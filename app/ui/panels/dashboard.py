@@ -21,11 +21,14 @@ from app.controllers.monitor_controller import MonitorController
 from app.services.ffmpeg_tools import list_camera_devices
 from app.services.monitor_service import (
     MonitorService,
+    capture_preview_snapshot,
     freeze_latest_global_frame,
     get_latest_global_frame,
     get_latest_preview_frame,
+    get_preview_frame_shape,
     pause_preview_for_monitoring,
     release_preview_capture,
+    set_preview_live_enabled,
     start_preview_for_selected_camera,
 )
 from app.ui.theme import Styles
@@ -76,7 +79,6 @@ class DashboardPanel(QWidget):
         self.camera_label = QLabel("Camera Device")
         self.fps_label = QLabel("Target FPS")
         self.camera_preview_title = QLabel("Camera Preview")
-        self.camera_preview_hint = QLabel("Preview runs on a dedicated FFmpeg pipeline")
 
         for label in [
             self.profile_label,
@@ -93,7 +95,6 @@ class DashboardPanel(QWidget):
             self.camera_label,
             self.fps_label,
             self.camera_preview_title,
-            self.camera_preview_hint,
         ]:
             disable_widget_interaction(label)
             label.setStyleSheet(Styles.info_label())
@@ -131,7 +132,8 @@ class DashboardPanel(QWidget):
         self.start_btn = QPushButton("▶ Start Monitoring")
         self.stop_btn = QPushButton("⏹ Stop")
         self.freeze_btn = QPushButton("📸 Capture Snapshot")
-        self.unfreeze_btn = QPushButton("▶ Live Preview")
+        self.unfreeze_btn = QPushButton("🎥 Live Preview: Off")
+        self.unfreeze_btn.setCheckable(True)
         for button in [self.start_btn, self.stop_btn, self.freeze_btn, self.unfreeze_btn]:
             button.setStyleSheet(Styles.button())
             disable_button_focus_rect(button)
@@ -196,7 +198,6 @@ class DashboardPanel(QWidget):
         content_layout.addLayout(metrics_row)
         content_layout.addLayout(metrics_row2)
         content_layout.addWidget(self.camera_preview_title)
-        content_layout.addWidget(self.camera_preview_hint)
         content_layout.addWidget(self.camera_preview)
         content_layout.addWidget(self.profile_preview)
         content_layout.addStretch()
@@ -223,7 +224,7 @@ class DashboardPanel(QWidget):
         self.start_btn.clicked.connect(self.start)
         self.stop_btn.clicked.connect(self.stop)
         self.freeze_btn.clicked.connect(self.freeze_frame)
-        self.unfreeze_btn.clicked.connect(self.unfreeze_frame)
+        self.unfreeze_btn.clicked.connect(self.toggle_live_preview)
         self.strictness_combo.currentIndexChanged.connect(self.on_strictness_changed)
         self.camera_combo.currentIndexChanged.connect(self.on_camera_changed)
         self.camera_refresh_btn.clicked.connect(self.refresh_camera_devices)
@@ -235,9 +236,10 @@ class DashboardPanel(QWidget):
         self.preview_timer.start()
 
         self._preview_failure_reason = "Camera preview unavailable"
+        self._last_preview_timestamp = None
+        set_preview_live_enabled(False)
         self.refresh_camera_devices()
         self.refresh()
-        self.ensure_preview_capture()
 
     def select_profile(self):
         profiles = list_profiles()
@@ -288,13 +290,13 @@ class DashboardPanel(QWidget):
             return
         self._frozen_frame = frozen
         self.status_label.setText("Snapshot captured")
+        self._last_preview_timestamp = None
         self.update_camera_preview()
 
-    def unfreeze_frame(self):
+    def toggle_live_preview(self):
         self._frozen_frame = None
-        if not app_state.monitoring_active:
-            self.ensure_preview_capture()
-        self.status_label.setText("Live preview")
+        enabled = self.unfreeze_btn.isChecked()
+        self._set_live_preview_enabled(enabled)
 
     def closeEvent(self, event):
         self.preview_timer.stop()
@@ -412,12 +414,14 @@ class DashboardPanel(QWidget):
             return
         device_name = self.camera_combo.itemData(index)
         if device_name is None:
+            self.status_label.setText("Camera missing")
             return
         display_text = self.camera_combo.itemText(index)
         clean_name = str(device_name)
         logging.info("[CAM_UI] camera changed index=%s display=%r stored=%r", index, display_text, clean_name)
         set_profile_camera_device(app_state.active_profile, clean_name)
-        self._preview_failure_reason = "Camera selection changed"
+        self._preview_failure_reason = ""
+        self._last_preview_timestamp = None
         release_preview_capture()
         self.ensure_preview_capture()
 
@@ -461,6 +465,8 @@ class DashboardPanel(QWidget):
             self.monitor_label.setText("Monitoring: Stopped")
         self.start_btn.setEnabled(app_state.selected_reference is not None and not self.monitor.isRunning())
         self.stop_btn.setEnabled(self.monitor.isRunning())
+        if not running and get_profile_camera_device(app_state.active_profile):
+            self.ensure_preview_capture()
 
     def on_metrics_update(self, payload):
         capture_fps = payload.get("capture_fps", 0.0)
@@ -489,6 +495,7 @@ class DashboardPanel(QWidget):
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
+        self._last_preview_timestamp = None
         self.update_camera_preview()
 
     def refresh_camera_devices(self):
@@ -496,40 +503,66 @@ class DashboardPanel(QWidget):
         self._cached_available_camera_devices = devices
         logging.info("[CAM_UI] refresh camera devices -> %s", self._cached_available_camera_devices)
         self.update_camera_devices()
-        if not app_state.monitoring_active:
-            self.ensure_preview_capture()
 
-    def ensure_preview_capture(self):
-        if app_state.monitoring_active:
-            return
-
+    def _preview_target_config(self):
         profile = app_state.active_profile
-        if not profile:
-            release_preview_capture()
-            return
-
-        selected_camera = get_profile_camera_device(profile)
-        if not selected_camera:
-            release_preview_capture()
-            return
-
-        width, height = get_profile_frame_size(profile)
-        if not width or not height:
-            width, height = get_profile_frame_size_fallback()
-        # Preview is intentionally downscaled to widget bounds to reduce CPU/memory churn.
+        frame_shape = get_preview_frame_shape()
+        if frame_shape is not None:
+            width, height = frame_shape
+        else:
+            width, height = get_profile_frame_size(profile)
+            if not width or not height:
+                width, height = get_profile_frame_size_fallback()
         preview_w = max(320, self.camera_preview.width())
         preview_h = max(180, self.camera_preview.height())
-        width = min(width, preview_w)
-        height = min(height, preview_h)
-        fps = min(15, max(10, get_profile_fps(profile)))
-        ok, message = start_preview_for_selected_camera(selected_camera, width, height, fps)
-        if not ok and message and "debounced" not in message and "paused" not in message:
-            self._preview_failure_reason = message
+        width = min(width, preview_w, 640)
+        height = min(height, preview_h, 360)
+        fps = min(10, max(1, get_profile_fps(profile)))
+        return width, height, fps
+
+    def _set_live_preview_enabled(self, enabled: bool):
+        set_preview_live_enabled(enabled)
+        self.unfreeze_btn.blockSignals(True)
+        self.unfreeze_btn.setChecked(enabled)
+        self.unfreeze_btn.setText("🎥 Live Preview: On" if enabled else "🎥 Live Preview: Off")
+        self.unfreeze_btn.blockSignals(False)
+
+        profile = app_state.active_profile
+        selected_camera = get_profile_camera_device(profile) if profile else None
+        if not selected_camera:
+            release_preview_capture()
+            self._preview_failure_reason = "Camera preview unavailable"
             self.camera_preview.setPixmap(QPixmap())
-            self.camera_preview.setText(message)
-            self.status_label.setText(message)
-        elif ok:
-            self._preview_failure_reason = ""
+            self.camera_preview.setText("Camera preview unavailable")
+            return
+
+        if app_state.monitoring_active:
+            self._preview_failure_reason = "Preview paused while monitoring is active"
+            self.camera_preview.setText(self._preview_failure_reason)
+            return
+
+        width, height, fps = self._preview_target_config()
+        if enabled:
+            ok, message = start_preview_for_selected_camera(selected_camera, width, height, fps)
+        else:
+            release_preview_capture()
+            ok, message = capture_preview_snapshot(selected_camera, width, height)
+
+        if not ok:
+            self._preview_failure_reason = message or "Camera preview unavailable"
+            self.camera_preview.setPixmap(QPixmap())
+            self.camera_preview.setText(self._preview_failure_reason)
+            self.status_label.setText(self._preview_failure_reason)
+            if enabled and message and "owned by" in message:
+                self._set_live_preview_enabled(False)
+            return
+
+        self._preview_failure_reason = ""
+        self._last_preview_timestamp = None
+        self.update_camera_preview()
+
+    def ensure_preview_capture(self):
+        self._set_live_preview_enabled(self.unfreeze_btn.isChecked())
 
     def update_camera_preview(self):
         if not self.isVisible():
@@ -537,31 +570,45 @@ class DashboardPanel(QWidget):
 
         frame_item = self._frozen_frame or get_latest_preview_frame() or get_latest_global_frame()
         if frame_item is None:
+            self._last_preview_timestamp = None
             self.camera_preview.setPixmap(QPixmap())
             self.camera_preview.setText(self._preview_failure_reason or "Camera preview unavailable")
             return
 
-        profile = app_state.active_profile
-        width, height = get_profile_frame_size(profile)
-        if not width or not height:
-            width, height = get_profile_frame_size_fallback()
-
-        _, raw = frame_item
-        frame = np.frombuffer(raw, dtype=np.uint8)
-        expected = width * height * 3
-        if frame.size != expected:
-            self.camera_preview.setPixmap(QPixmap())
-            self.camera_preview.setText("Preview size mismatch")
+        timestamp, payload = frame_item
+        if self._last_preview_timestamp == timestamp:
             return
 
-        bgr = frame.reshape((height, width, 3))
+        if isinstance(payload, np.ndarray):
+            bgr = payload
+            if bgr.ndim != 3 or bgr.shape[2] != 3:
+                self.camera_preview.setPixmap(QPixmap())
+                self.camera_preview.setText("Camera preview unavailable")
+                return
+            height, width, _ = bgr.shape
+        else:
+            frame_shape = get_preview_frame_shape()
+            if frame_shape is not None:
+                width, height = frame_shape
+            else:
+                profile = app_state.active_profile
+                width, height = get_profile_frame_size(profile)
+                if not width or not height:
+                    width, height = get_profile_frame_size_fallback()
+            frame = np.frombuffer(payload, dtype=np.uint8)
+            expected = width * height * 3
+            if frame.size != expected:
+                self.camera_preview.setPixmap(QPixmap())
+                self.camera_preview.setText("Camera preview unavailable")
+                return
+            bgr = frame.reshape((height, width, 3))
         image = QImage(
             bgr.data,
             width,
             height,
             width * 3,
             QImage.Format.Format_BGR888,
-        ).copy()
+        )
         pixmap = QPixmap.fromImage(image)
         self.camera_preview.setPixmap(
             pixmap.scaled(
@@ -571,3 +618,4 @@ class DashboardPanel(QWidget):
             )
         )
         self.camera_preview.setText("")
+        self._last_preview_timestamp = timestamp

@@ -14,6 +14,7 @@ from app.services.ffmpeg_tools import (
     CaptureConfig,
     FfmpegNotFoundError,
     build_capture_input_candidates,
+    capture_single_frame_by_token,
 )
 from app.services.frame_bus import FrameQueue
 from app.services.frame_consumers import DetectionConsumer, MetricsConsumer, SnapshotConsumer
@@ -46,6 +47,8 @@ _PREVIEW_PAUSED_FOR_MONITORING = False
 _PREVIEW_LAST_RESTART_AT = 0.0
 _PREVIEW_RESTART_DEBOUNCE_SEC = 1.5
 _PREVIEW_MAX_RETRIES = 2
+_PREVIEW_STATIC_FRAME: tuple[float, np.ndarray] | None = None
+_PREVIEW_LIVE_ENABLED = False
 _CAMERA_REOPEN_COOLDOWN_SEC = 0.4
 
 _CAMERA_OWNER_LOCK = threading.Lock()
@@ -196,7 +199,7 @@ def _ensure_preview_capture(input_token: str, config: CaptureConfig, *, allow_in
             _release_camera_owner("preview", input_token)
             return False, "Preview cooldown interrupted"
 
-        _PREVIEW_QUEUE = FrameQueue(maxlen=3)
+        _PREVIEW_QUEUE = FrameQueue(maxlen=2)
         _PREVIEW_CAPTURE = FfmpegCapture(
             input_token=input_token,
             config=config,
@@ -227,9 +230,11 @@ def release_preview_capture() -> None:
 
 
 def pause_preview_for_monitoring() -> None:
-    global _PREVIEW_PAUSED_FOR_MONITORING
+    global _PREVIEW_PAUSED_FOR_MONITORING, _PREVIEW_STATIC_FRAME, _PREVIEW_CONFIG
     with _PREVIEW_LOCK:
         _PREVIEW_PAUSED_FOR_MONITORING = True
+        _PREVIEW_STATIC_FRAME = None
+        _PREVIEW_CONFIG = None
     logging.info("[CAM_PREVIEW] pause for monitoring")
     release_preview_capture()
 
@@ -241,14 +246,71 @@ def resume_preview_after_monitoring() -> None:
     logging.info("[CAM_PREVIEW] resume allowed")
 
 
+def capture_preview_snapshot(selected_display_name: str, width: int, height: int) -> tuple[bool, str | None]:
+    """Capture one frame for default preview and release camera ownership immediately."""
+    global _PREVIEW_STATIC_FRAME, _PREVIEW_CONFIG
+    candidates = build_capture_input_candidates(selected_display_name)
+    if not candidates:
+        with _PREVIEW_LOCK:
+            _PREVIEW_STATIC_FRAME = None
+            _PREVIEW_CONFIG = None
+        return False, "Camera preview unavailable"
+
+    candidate = candidates[0]
+    with _PREVIEW_LOCK:
+        if _PREVIEW_PAUSED_FOR_MONITORING:
+            return False, "Preview paused while monitoring is active"
+
+    attempts = _PREVIEW_MAX_RETRIES
+    last_reason = "Camera preview unavailable"
+    for attempt in range(1, attempts + 1):
+        acquired, reason = _acquire_camera_owner("preview", candidate.token)
+        if not acquired:
+            return False, reason or "Camera preview unavailable"
+        try:
+            if not _wait_camera_reopen_cooldown():
+                last_reason = "Camera preview unavailable"
+                continue
+            raw = capture_single_frame_by_token(candidate.token, width=width, height=height)
+            arr = np.frombuffer(raw, dtype=np.uint8)
+            expected = width * height * 3
+            if arr.size != expected:
+                last_reason = "Camera preview unavailable"
+                continue
+            frame = arr.reshape((height, width, 3)).copy()
+            with _PREVIEW_LOCK:
+                _PREVIEW_STATIC_FRAME = (time.time(), frame)
+                _PREVIEW_CONFIG = CaptureConfig(width=width, height=height, fps=1, label="snapshot")
+            return True, None
+        except FfmpegNotFoundError as exc:
+            return False, f"Preview failed: FFmpeg not found ({exc})"
+        except Exception:
+            logging.warning("[CAM_PREVIEW] snapshot failed", exc_info=True)
+            last_reason = "Camera preview unavailable"
+        finally:
+            _release_camera_owner("preview", candidate.token)
+
+        if attempt < attempts:
+            time.sleep(_CAMERA_REOPEN_COOLDOWN_SEC)
+
+    return False, last_reason
+
+
+def set_preview_live_enabled(enabled: bool) -> None:
+    global _PREVIEW_LIVE_ENABLED
+    with _PREVIEW_LOCK:
+        _PREVIEW_LIVE_ENABLED = bool(enabled)
+
+
 def start_preview_for_selected_camera(selected_display_name: str, width: int, height: int, fps: int) -> tuple[bool, str | None]:
+    global _PREVIEW_STATIC_FRAME
     candidates = build_capture_input_candidates(selected_display_name)
     if not candidates:
         release_preview_capture()
         return False, "Preview failed: selected camera not found"
 
     candidate = candidates[0]
-    configs = _build_monitoring_config_ladder(width, height, fps, is_virtual=candidate.is_virtual)
+    configs = _build_monitoring_config_ladder(width, height, min(10, fps), is_virtual=candidate.is_virtual)
     attempts = min(_PREVIEW_MAX_RETRIES, len(configs))
     last_reason = "unknown preview failure"
 
@@ -273,6 +335,7 @@ def start_preview_for_selected_camera(selected_display_name: str, width: int, he
         time.sleep(0.15)
         with _PREVIEW_LOCK:
             if _PREVIEW_CAPTURE and _PREVIEW_CAPTURE.is_alive():
+                _PREVIEW_STATIC_FRAME = None
                 return True, None
             reason = _PREVIEW_CAPTURE.last_error if _PREVIEW_CAPTURE else "ffmpeg exited"
             last_reason = reason or "ffmpeg exited"
@@ -286,12 +349,21 @@ def start_preview_for_selected_camera(selected_display_name: str, width: int, he
 
 def get_latest_preview_frame():
     with _PREVIEW_LOCK:
-        if not _PREVIEW_QUEUE:
-            return None
-        packet = _PREVIEW_QUEUE.peek_latest()
-        if packet is None:
-            return None
-        return (packet.timestamp, packet.payload)
+        if _PREVIEW_LIVE_ENABLED:
+            if not _PREVIEW_QUEUE:
+                return None
+            packet = _PREVIEW_QUEUE.peek_latest()
+            if packet is None:
+                return None
+            return (packet.timestamp, packet.payload)
+        return _PREVIEW_STATIC_FRAME
+
+
+def get_preview_frame_shape() -> tuple[int, int] | None:
+    with _PREVIEW_LOCK:
+        if _PREVIEW_CONFIG:
+            return (_PREVIEW_CONFIG.width, _PREVIEW_CONFIG.height)
+    return None
 
 
 def get_latest_global_frame():
