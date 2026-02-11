@@ -71,6 +71,8 @@ def _reset_globals(monitor_service):
     monitor_service._PREVIEW_CONFIG = None
     monitor_service._PREVIEW_PAUSED_FOR_MONITORING = False
     monitor_service._PREVIEW_LAST_RESTART_AT = 0.0
+    monitor_service._PREVIEW_STATIC_FRAME = None
+    monitor_service._PREVIEW_LIVE_ENABLED = False
     monitor_service._ACTIVE_OWNER_PIPELINE = None
     monitor_service._ACTIVE_CAMERA_TOKEN = None
     monitor_service._LAST_CAMERA_RELEASE_AT = 0.0
@@ -193,6 +195,15 @@ class MonitorCaptureTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIsNone(reason)
         self.assertEqual(calls["count"], 2)
+
+
+    def test_snapshot_preview_releases_camera_owner(self):
+        with mock.patch.object(self.monitor_service, "build_capture_input_candidates", return_value=[SimpleNamespace(token="video=cam-a", is_virtual=False)]):
+            with mock.patch.object(self.monitor_service, "capture_single_frame_by_token", return_value=b"x" * (640 * 480 * 3)):
+                ok, reason = self.monitor_service.capture_preview_snapshot("cam-a", 640, 480)
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+        self.assertIsNone(self.monitor_service._ACTIVE_OWNER_PIPELINE)
 
     def _fail_capture_once(self, input_token, config, *, allow_input_tuning):
         queue = self.monitor_service.FrameQueue(maxlen=2)
