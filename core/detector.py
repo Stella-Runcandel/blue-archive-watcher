@@ -22,6 +22,7 @@ from core import storage
 EXIT_TIMEOUT = 0.6  # seconds dialogue must disappear to reset
 DEBUG_STORAGE_LIMIT_BYTES = 1_073_741_824  # 1 GB
 DEBUG_STORAGE_LIMIT_COUNT = 2000
+DETECTION_SCALE = 0.75
 
 
 # =========================
@@ -45,6 +46,8 @@ class DetectionResult:
     confidence: float
     reference: str | None
     timestamp: float
+    event_start: bool = False
+    debug_frame: object = None
 
 
 # =========================
@@ -257,11 +260,30 @@ def evaluate_frame(profile_name, frame, state: DetectorState, selected_reference
     )
 
     now = time.time()
+    detection_scale = float(DETECTION_SCALE)
+    if detection_scale <= 0.0 or detection_scale > 1.0:
+        detection_scale = 1.0
+    small_frame = cv2.resize(
+        frame_gray,
+        None,
+        fx=detection_scale,
+        fy=detection_scale,
+        interpolation=cv2.INTER_AREA,
+    )
     matched_ref, match_bbox, confidence = _find_best_match(
         profile_name,
-        frame_gray,
+        small_frame,
         selected_reference,
     )
+    if match_bbox is not None and detection_scale != 1.0:
+        inv = 1.0 / detection_scale
+        x, y, w, h = match_bbox
+        match_bbox = (
+            int(round(x * inv)),
+            int(round(y * inv)),
+            int(round(w * inv)),
+            int(round(h * inv)),
+        )
 
     if matched_ref is not None:
         state.last_seen_time = now
@@ -288,7 +310,10 @@ def evaluate_frame(profile_name, frame, state: DetectorState, selected_reference
                     matched_ref,
                 )
 
-        return DetectionResult(True, float(confidence), matched_ref, now)
+        debug_flash = None
+        if event_start:
+            debug_flash = debug.copy()
+        return DetectionResult(True, float(confidence), matched_ref, now, event_start=event_start, debug_frame=debug_flash)
 
     if state.active_dialogue and now - state.last_seen_time > EXIT_TIMEOUT:
         state.active_dialogue = None

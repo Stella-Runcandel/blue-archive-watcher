@@ -34,9 +34,11 @@ from app.services.monitor_service import (
 from app.ui.theme import Styles
 from app.ui.widget_utils import disable_button_focus_rect, disable_widget_interaction, make_preview_label
 from core import detector as dect
+from core import storage
 from core.profiles import (
     get_detection_threshold,
     get_profile_camera_device,
+    get_profile_dirs,
     get_profile_fps,
     get_profile_frame_size,
     get_profile_frame_size_fallback,
@@ -51,6 +53,7 @@ from core.profiles import (
 class DashboardPanel(QWidget):
     MAX_PREVIEW_WIDTH = 640
     MAX_PREVIEW_HEIGHT = 360
+    DEBUG_FLASH_SECONDS = 1.0
 
     STRICTNESS_OPTIONS = [
         ("Very Loose", 0.55),
@@ -67,6 +70,8 @@ class DashboardPanel(QWidget):
         self.profile_preview_bytes = None
         self._frozen_frame = None
         self._cached_available_camera_devices = []
+        self._match_flash_frame = None
+        self._match_flash_expiry = 0.0
 
         self.profile_label = QLabel("Profile: None")
         self.frame_label = QLabel("Selected Frame: None")
@@ -222,6 +227,7 @@ class DashboardPanel(QWidget):
         self.monitor.status.connect(self.status_label.setText)
         self.monitor.metrics.connect(self.on_metrics_update)
         self.monitor.state_changed.connect(self.on_monitor_state_changed)
+        self.monitor.match_debug_frame.connect(self.on_match_debug_frame)
         self.monitor_controller = MonitorController(self.monitor)
 
         self.start_btn.clicked.connect(self.start)
@@ -275,6 +281,7 @@ class DashboardPanel(QWidget):
             return
         self._frozen_frame = None
         pause_preview_for_monitoring()
+        self.preview_timer.stop()
         self.refresh_camera_devices()
         result = self.monitor_controller.start()
         self.status_label.setText(result)
@@ -294,7 +301,10 @@ class DashboardPanel(QWidget):
             self.status_label.setText("No frame available to capture")
             return
         self._frozen_frame = frozen
-        self.status_label.setText("Snapshot captured")
+        if self._save_snapshot_frame(frozen):
+            self.status_label.setText("Snapshot captured")
+        else:
+            self.status_label.setText("Snapshot captured (save failed)")
         self._last_preview_timestamp = None
         self.update_camera_preview()
 
@@ -435,6 +445,7 @@ class DashboardPanel(QWidget):
         set_profile_camera_device(app_state.active_profile, clean_name)
         self._last_preview_timestamp = None
         self._preview_last_valid_frame_time = 0.0
+        self._frozen_frame = None
         release_preview_capture()
         self.ensure_preview_capture()
 
@@ -467,6 +478,10 @@ class DashboardPanel(QWidget):
         running = state == "RUNNING"
         app_state.monitoring_active = running
         if running:
+            self.preview_timer.stop()
+        elif not self.preview_timer.isActive():
+            self.preview_timer.start()
+        if running:
             self.monitor_label.setText(f"Monitoring: Running ({app_state.selected_reference})")
         elif state == "STARTING":
             self.monitor_label.setText("Monitoring: Starting")
@@ -480,6 +495,21 @@ class DashboardPanel(QWidget):
         self.stop_btn.setEnabled(self.monitor.isRunning())
         if not running and get_profile_camera_device(app_state.active_profile):
             self.ensure_preview_capture()
+        self.update_camera_preview()
+
+    def on_match_debug_frame(self, payload):
+        frame = np.asarray(payload)
+        if frame.ndim == 2:
+            mode = "gray"
+        elif frame.ndim == 3 and frame.shape[2] == 3:
+            mode = "bgr"
+        else:
+            logging.warning("Ignoring debug flash frame with unsupported shape: %s", getattr(frame, "shape", None))
+            return
+        self._match_flash_frame = (mode, np.ascontiguousarray(frame))
+        self._match_flash_expiry = time.time() + self.DEBUG_FLASH_SECONDS
+        self._last_preview_timestamp = None
+        self.update_camera_preview()
 
     def on_metrics_update(self, payload):
         capture_fps = payload.get("capture_fps", 0.0)
@@ -528,8 +558,68 @@ class DashboardPanel(QWidget):
                 width, height = get_profile_frame_size_fallback()
         width = min(width, self.MAX_PREVIEW_WIDTH)
         height = min(height, self.MAX_PREVIEW_HEIGHT)
-        fps = min(30, max(1, get_profile_fps(profile)))
+        fps = min(15, max(1, get_profile_fps(profile)))
         return width, height, fps
+
+    def _resolve_gray_payload(self, payload):
+        if isinstance(payload, np.ndarray):
+            if payload.ndim == 2:
+                return np.ascontiguousarray(payload)
+            if payload.ndim == 3 and payload.shape[2] >= 1:
+                return np.ascontiguousarray(payload[:, :, 0])
+            logging.warning("Unexpected ndarray payload shape for grayscale frame: %s", payload.shape)
+            return None
+
+        arr = np.frombuffer(payload, dtype=np.uint8)
+        known_shape = get_preview_frame_shape()
+        if known_shape:
+            known_width, known_height = known_shape
+            if arr.size == known_width * known_height:
+                try:
+                    return arr.reshape((known_height, known_width))
+                except ValueError:
+                    logging.warning("Failed to reshape payload with preview config %sx%s", known_width, known_height)
+
+        fallback_width, fallback_height = get_profile_frame_size_fallback()
+        if arr.size == fallback_width * fallback_height:
+            try:
+                return arr.reshape((fallback_height, fallback_width))
+            except ValueError:
+                logging.warning("Failed to reshape payload with fallback config %sx%s", fallback_width, fallback_height)
+
+        # Last resort: only infer perfect-square payloads safely.
+        side = int(arr.size ** 0.5)
+        if side > 0 and side * side == arr.size:
+            try:
+                return arr.reshape((side, side))
+            except ValueError:
+                logging.warning("Failed to reshape payload using inferred square side=%s", side)
+
+        logging.warning("Unexpected grayscale payload size: %s", arr.size)
+        return None
+
+    def _save_snapshot_frame(self, frame_item):
+        if not app_state.active_profile or frame_item is None:
+            return False
+        try:
+            timestamp, payload = frame_item
+            gray = self._resolve_gray_payload(payload)
+            if gray is None:
+                return False
+
+            import cv2
+            from pathlib import Path
+
+            frames_dir = Path(get_profile_dirs(app_state.active_profile)["frames"])
+            name = f"snapshot_{int(timestamp * 1000)}.png"
+            out_path = frames_dir / name
+            if not cv2.imwrite(str(out_path), gray):
+                return False
+            storage.add_frame(app_state.active_profile, name, str(out_path))
+            return True
+        except Exception:
+            logging.exception("Failed to save snapshot frame")
+            return False
 
     def _set_live_preview_enabled(self, enabled: bool):
         set_preview_live_enabled(enabled)
@@ -556,7 +646,6 @@ class DashboardPanel(QWidget):
         if enabled:
             ok, message = start_preview_for_selected_camera(selected_camera, width, height, fps)
         else:
-            release_preview_capture()
             ok, message = capture_preview_snapshot(selected_camera, width, height)
 
         if not ok:
@@ -579,6 +668,39 @@ class DashboardPanel(QWidget):
         if not self.isVisible():
             return
 
+        if self._match_flash_frame is not None and time.time() > self._match_flash_expiry:
+            self._match_flash_frame = None
+
+        if self._match_flash_frame is not None:
+            mode, payload = self._match_flash_frame
+            height, width = payload.shape[:2]
+            if mode == "gray":
+                image = QImage(
+                    payload.data,
+                    width,
+                    height,
+                    int(payload.strides[0]),
+                    QImage.Format.Format_Grayscale8,
+                )
+            else:
+                image = QImage(
+                    payload.data,
+                    width,
+                    height,
+                    int(payload.strides[0]),
+                    QImage.Format.Format_BGR888,
+                )
+            pixmap = QPixmap.fromImage(image)
+            self.camera_preview.setPixmap(
+                pixmap.scaled(
+                    self.camera_preview.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            self.camera_preview.setText("")
+            return
+
         frame_item = self._frozen_frame or get_latest_preview_frame() or get_latest_global_frame()
         if frame_item is None:
             self._last_preview_timestamp = None
@@ -595,31 +717,16 @@ class DashboardPanel(QWidget):
         if self._last_preview_timestamp == timestamp:
             return
 
-        if isinstance(payload, np.ndarray):
-            bgr = payload
-            if bgr.ndim != 3 or bgr.shape[2] != 3:
-                return
-            height, width, _ = bgr.shape
-        else:
-            frame_shape = get_preview_frame_shape()
-            if frame_shape is not None:
-                width, height = frame_shape
-            else:
-                profile = app_state.active_profile
-                width, height = get_profile_frame_size(profile)
-                if not width or not height:
-                    width, height = get_profile_frame_size_fallback()
-            frame = np.frombuffer(payload, dtype=np.uint8)
-            expected = width * height * 3
-            if frame.size != expected:
-                return
-            bgr = frame.reshape((height, width, 3))
+        gray = self._resolve_gray_payload(payload)
+        if gray is None:
+            return
+        height, width = gray.shape
         image = QImage(
-            bgr.data,
+            gray.data,
             width,
             height,
-            width * 3,
-            QImage.Format.Format_BGR888,
+            int(gray.strides[0]),
+            QImage.Format.Format_Grayscale8,
         )
         pixmap = QPixmap.fromImage(image)
         self.camera_preview.setPixmap(

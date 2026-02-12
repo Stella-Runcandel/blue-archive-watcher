@@ -21,7 +21,7 @@ class FramePacket:
 
 
 class FrameQueue:
-    def __init__(self, maxlen: int = 8, policy: OverflowPolicy = OverflowPolicy.DROP_OLDEST):
+    def __init__(self, maxlen: int = 3, policy: OverflowPolicy = OverflowPolicy.DROP_OLDEST):
         self.maxlen = max(1, int(maxlen))
         self.policy = policy
         self._queue: Deque[FramePacket] = deque(maxlen=self.maxlen)

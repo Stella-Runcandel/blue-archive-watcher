@@ -90,7 +90,7 @@ class FfmpegCaptureSupervisor:
     def _reader_loop(self) -> None:
         if not self.process or not self.process.stdout:
             return
-        frame_size = self.config.width * self.config.height * 3
+        frame_size = self.config.width * self.config.height
         try:
             while not self._stop.is_set():
                 frame = self._read_exact(self.process.stdout, frame_size)
@@ -171,8 +171,7 @@ class FfmpegCaptureSupervisor:
         except Exception:
             pass
 
-    @staticmethod
-    def _classify_log(text: str) -> LogLevel:
+    def _classify_log(self, text: str) -> LogLevel:
         lowered = text.lower()
         if any(token in lowered for token in ("error", "failed", "invalid", "unable", "i/o")):
             return LogLevel.ERROR

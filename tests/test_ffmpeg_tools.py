@@ -105,7 +105,7 @@ class FfmpegToolsTests(unittest.TestCase):
         self.assertNotIn("-video_size", cmd)
         self.assertNotIn("-framerate", cmd)
         self.assertIn("-vf", cmd)
-        self.assertIn("scale=1280:720:flags=fast_bilinear", cmd)
+        self.assertIn("fps=30,scale=1280:720:flags=fast_bilinear,format=gray", cmd)
 
     @patch(
         "app.services.ffmpeg_tools.list_camera_devices",
