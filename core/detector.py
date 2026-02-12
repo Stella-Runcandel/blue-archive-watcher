@@ -33,9 +33,11 @@ ENABLE_DEBUG_LOGGING = os.getenv("ENABLE_DEBUG_LOGGING", "0") == "1"
 
 
 cv2.setUseOptimized(True)
-# Keep OpenCV multithreading enabled for template matching workloads.
-cv_threads = int(os.getenv("DETECTOR_CV_THREADS", str(os.cpu_count() or 1)))
-cv2.setNumThreads(max(1, cv_threads))
+# Force single-threaded OpenCV execution to avoid CPU overcommit/contention
+# in real-time capture pipelines. If you need to re-enable OpenCV threading,
+# adjust this value (or gate it behind an opt-in env var) after profiling.
+cv2.setNumThreads(1)
+cv2.ocl.setUseOpenCL(False)
 
 
 @dataclass(frozen=True)

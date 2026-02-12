@@ -310,18 +310,19 @@ class MonitorCaptureTests(unittest.TestCase):
             SimpleNamespace(confidence=0.1, matched=False, timestamp=1.2, event_start=False, debug_frame=None),
         ]
 
+        alert_events = []
+        service.play_alert_sound.connect(lambda: alert_events.append("played"))
+
         with (
             mock.patch.object(self.monitor_service.app_state, "selected_reference", "ref"),
             mock.patch.object(service._metrics, "on_frame"),
             mock.patch.object(service._detection_consumer, "is_paused", return_value=False),
             mock.patch.object(self.monitor_service.time, "time", side_effect=[0.0, 0.01, 0.02, 0.03]),
             mock.patch.object(self.monitor_service.dect, "evaluate_frame", side_effect=results),
-            mock.patch.object(service, "_play_alert_sound") as play_mock,
         ):
-            service.play_alert_sound.connect(service._play_alert_sound)
             service._processing_loop("alpha", queue, 2, 2)
 
-        self.assertEqual(play_mock.call_count, 1)
+        self.assertEqual(len(alert_events), 1)
 
     def test_monitoring_retries_limited_and_reports_failure(self):
         service = self.monitor_service.MonitorService()

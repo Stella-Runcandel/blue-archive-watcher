@@ -1,10 +1,12 @@
 """Dashboard panel showing monitoring controls and live metrics."""
 import logging
 import time
+from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import QTimer, Qt
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtCore import QTimer, Qt, QUrl
+from PyQt6.QtGui import QImage, QMovie, QPixmap
+from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -70,6 +72,7 @@ class DashboardPanel(QWidget):
         self._cached_available_camera_devices = []
         self._match_flash_frame = None
         self._match_flash_expiry = 0.0
+        self._alert_animation_token = 0
 
         self.profile_label = QLabel("Profile: None")
         self.frame_label = QLabel("Selected Frame: None")
@@ -160,6 +163,32 @@ class DashboardPanel(QWidget):
             """
         )
 
+        # Alert assets are loaded from app/assets/alert.mp3 and app/assets/alert.gif.
+        assets_dir = Path(__file__).resolve().parents[2] / "assets"
+        alert_mp3_path = assets_dir / "alert.mp3"
+        alert_gif_path = assets_dir / "alert.gif"
+
+        self.alert_label = QLabel()
+        self.alert_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.alert_label.setVisible(False)
+        self.alert_label.setStyleSheet("QLabel { background: transparent; border: none; }")
+
+        # Keep QMediaPlayer/QAudioOutput as instance attributes so playback is not
+        # interrupted by garbage collection while an alert is still playing.
+        self.alert_audio_output = QAudioOutput(self)
+        self.alert_audio_output.setVolume(0.7)
+        self.alert_player = QMediaPlayer(self)
+        self.alert_player.setAudioOutput(self.alert_audio_output)
+        if alert_mp3_path.exists():
+            self.alert_player.setSource(QUrl.fromLocalFile(str(alert_mp3_path.resolve())))
+        else:
+            logging.warning("Alert MP3 not found at %s", alert_mp3_path)
+
+        self.alert_movie = QMovie(str(alert_gif_path.resolve())) if alert_gif_path.exists() else QMovie()
+        self.alert_label.setMovie(self.alert_movie)
+        if not alert_gif_path.exists():
+            logging.warning("Alert GIF not found at %s", alert_gif_path)
+
         content_layout = QVBoxLayout()
         profile_row = QHBoxLayout()
         profile_row.addWidget(self.profile_label)
@@ -205,6 +234,7 @@ class DashboardPanel(QWidget):
         content_layout.addLayout(metrics_row2)
         content_layout.addWidget(self.camera_preview_title)
         content_layout.addWidget(self.camera_preview)
+        content_layout.addWidget(self.alert_label)
         content_layout.addWidget(self.profile_preview)
         content_layout.addStretch()
 
@@ -226,6 +256,7 @@ class DashboardPanel(QWidget):
         self.monitor.metrics.connect(self.on_metrics_update)
         self.monitor.state_changed.connect(self.on_monitor_state_changed)
         self.monitor.match_debug_frame.connect(self.on_match_debug_frame)
+        self.monitor.play_alert_sound.connect(self.on_play_alert_sound)
         self.monitor_controller = MonitorController(self.monitor)
 
         self.start_btn.clicked.connect(self.start)
@@ -250,6 +281,31 @@ class DashboardPanel(QWidget):
         set_preview_live_enabled(False)
         self.refresh_camera_devices()
         self.refresh()
+
+    def on_play_alert_sound(self):
+        """Play alert MP3 and show GIF for 2.5 seconds when detection starts."""
+        if self.alert_player.source().isEmpty():
+            logging.warning("Alert MP3 source is not configured; skipping audio playback.")
+        else:
+            self.alert_player.stop()
+            self.alert_player.play()
+
+        if self.alert_movie.fileName():
+            self.alert_label.setVisible(True)
+            self.alert_movie.stop()
+            self.alert_movie.start()
+            # Keep the alert animation visible for 2500 ms, then stop/hide it.
+            self._alert_animation_token += 1
+            token = self._alert_animation_token
+            QTimer.singleShot(2500, lambda: self._hide_alert_animation(token))
+        else:
+            logging.warning("Alert GIF source is not configured; skipping animation.")
+
+    def _hide_alert_animation(self, token=None):
+        if token is not None and token != self._alert_animation_token:
+            return
+        self.alert_movie.stop()
+        self.alert_label.setVisible(False)
 
     def select_profile(self):
         profiles = list_profiles()
