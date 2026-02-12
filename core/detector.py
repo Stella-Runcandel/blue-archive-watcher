@@ -24,7 +24,6 @@ from core import storage
 EXIT_TIMEOUT = 0.6  # seconds dialogue must disappear to reset
 DEBUG_STORAGE_LIMIT_BYTES = 1_073_741_824  # 1 GB
 DEBUG_STORAGE_LIMIT_COUNT = 2000
-DEBUG_SAVE_INTERVAL_SECONDS = float(os.getenv("DEBUG_SAVE_INTERVAL_SECONDS", "1.0"))
 FRAME_COARSE_SCALE = float(os.getenv("FRAME_COARSE_SCALE", "0.5"))
 COARSE_THRESHOLD_FACTOR = 0.75
 COARSE_THRESHOLD_FLOOR = 0.45
@@ -77,7 +76,6 @@ class DetectorState:
     debug_counter: int = 0
     debug_limit_warning_emitted: bool = False
     total_debug_storage_bytes: int = 0
-    last_debug_save_time: float = 0.0
     last_match_time_ms: float = 0.0
 
 
@@ -162,13 +160,30 @@ def _save_debug_image_if_allowed(debug_dir, debug_image, state: DetectorState, p
                 logging.warning("Failed to prune debug image %s", path, exc_info=True)
         state.total_debug_storage_bytes = _compute_initial_debug_storage_bytes()
 
-        state.last_debug_frame = debug_image
+        state.last_debug_frame = debug_image.copy()
 
     except Exception:
         logging.warning(
             "Failed to write debug image; continuing monitoring.",
             exc_info=True,
         )
+
+
+def _debug_images_similar(img1, img2, threshold=0.97):
+    if img1 is None or img2 is None:
+        return False
+
+    if img1.ndim == 3:
+        img1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+    if img2.ndim == 3:
+        img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+
+    if img1.shape != img2.shape:
+        img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]), interpolation=cv2.INTER_AREA)
+
+    result = cv2.matchTemplate(img1, img2, cv2.TM_CCOEFF_NORMED)
+    similarity = float(result[0][0])
+    return similarity >= threshold
 
 
 # =========================
@@ -403,8 +418,9 @@ def evaluate_frame(profile_name, frame, state: DetectorState, selected_reference
         if state.active_dialogue != matched_ref:
             state.active_dialogue = matched_ref
 
-        should_save_debug = event_start or (now - state.last_debug_save_time >= DEBUG_SAVE_INTERVAL_SECONDS)
-        if should_save_debug:
+        should_save_debug = False
+        debug = None
+        if event_start:
             debug = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
             if roi is not None:
                 roi_x, roi_y, roi_w, roi_h = roi
@@ -412,16 +428,17 @@ def evaluate_frame(profile_name, frame, state: DetectorState, selected_reference
             x, y, w, h = match_bbox
             cv2.rectangle(debug, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-            debug_dir = get_debug_dir()
-            if debug_dir:
-                _save_debug_image_if_allowed(
-                    debug_dir,
-                    debug,
-                    state,
-                    profile_name if profile_valid else None,
-                    matched_ref,
-                )
-                state.last_debug_save_time = now
+            if state.last_debug_frame is None or not _debug_images_similar(debug, state.last_debug_frame):
+                debug_dir = get_debug_dir()
+                if debug_dir:
+                    _save_debug_image_if_allowed(
+                        debug_dir,
+                        debug,
+                        state,
+                        profile_name if profile_valid else None,
+                        matched_ref,
+                    )
+                    should_save_debug = True
 
         debug_flash = None
         if should_save_debug:
@@ -432,7 +449,6 @@ def evaluate_frame(profile_name, frame, state: DetectorState, selected_reference
         state.active_dialogue = None
         state.event_active = False
         state.last_debug_frame = None
-        state.last_debug_save_time = 0.0
 
     return DetectionResult(False, float(confidence), None, now)
 

@@ -72,7 +72,6 @@ class DashboardPanel(QWidget):
         self._cached_available_camera_devices = []
         self._match_flash_frame = None
         self._match_flash_expiry = 0.0
-        self._alert_animation_token = 0
 
         self.profile_label = QLabel("Profile: None")
         self.frame_label = QLabel("Selected Frame: None")
@@ -167,6 +166,8 @@ class DashboardPanel(QWidget):
         assets_dir = Path(__file__).resolve().parents[2] / "assets"
         alert_mp3_path = assets_dir / "alert.mp3"
         alert_gif_path = assets_dir / "alert.gif"
+        logging.warning(f"Resolved MP3 path: {alert_mp3_path}")
+        logging.warning(f"Resolved GIF path: {alert_gif_path}")
 
         self.alert_label = QLabel()
         self.alert_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -283,9 +284,8 @@ class DashboardPanel(QWidget):
         self.refresh()
 
     def on_play_alert_sound(self):
-        """Play alert MP3 and show GIF for 2.5 seconds when detection starts."""
         if self.alert_player.source().isEmpty():
-            logging.warning("Alert MP3 source is not configured; skipping audio playback.")
+            logging.warning("Alert MP3 missing or invalid")
         else:
             self.alert_player.stop()
             self.alert_player.play()
@@ -294,16 +294,11 @@ class DashboardPanel(QWidget):
             self.alert_label.setVisible(True)
             self.alert_movie.stop()
             self.alert_movie.start()
-            # Keep the alert animation visible for 2500 ms, then stop/hide it.
-            self._alert_animation_token += 1
-            token = self._alert_animation_token
-            QTimer.singleShot(2500, lambda: self._hide_alert_animation(token))
+            QTimer.singleShot(2500, self._hide_alert_animation)
         else:
-            logging.warning("Alert GIF source is not configured; skipping animation.")
+            logging.warning("Alert GIF missing or invalid")
 
-    def _hide_alert_animation(self, token=None):
-        if token is not None and token != self._alert_animation_token:
-            return
+    def _hide_alert_animation(self):
         self.alert_movie.stop()
         self.alert_label.setVisible(False)
 
