@@ -5,6 +5,7 @@ import sys
 from types import SimpleNamespace
 from unittest import mock
 
+from app.services.capture_constants import CANONICAL_HEIGHT, CANONICAL_WIDTH
 from app.services.ffmpeg_tools import CaptureConfig
 
 
@@ -199,10 +200,12 @@ class MonitorCaptureTests(unittest.TestCase):
 
     def test_snapshot_preview_releases_camera_owner(self):
         with mock.patch.object(self.monitor_service, "build_capture_input_candidates", return_value=[SimpleNamespace(token="video=cam-a", is_virtual=False)]):
-            with mock.patch.object(self.monitor_service, "capture_single_frame_by_token", return_value=b"x" * (640 * 480)):
+            with mock.patch.object(self.monitor_service, "capture_single_frame_by_token", return_value=b"x" * (CANONICAL_WIDTH * CANONICAL_HEIGHT)):
                 ok, reason = self.monitor_service.capture_preview_snapshot("cam-a", 640, 480)
         self.assertTrue(ok)
         self.assertIsNone(reason)
+        self.assertEqual(self.monitor_service._PREVIEW_CONFIG.width, CANONICAL_WIDTH)
+        self.assertEqual(self.monitor_service._PREVIEW_CONFIG.height, CANONICAL_HEIGHT)
         self.assertIsNone(self.monitor_service._ACTIVE_OWNER_PIPELINE)
 
     def _fail_capture_once(self, input_token, config, *, allow_input_tuning):
@@ -224,7 +227,6 @@ class MonitorCaptureTests(unittest.TestCase):
             mock.patch.object(self.monitor_service, "resume_preview_after_monitoring"),
             mock.patch.object(self.monitor_service, "get_profile_dirs"),
             mock.patch.object(self.monitor_service, "get_profile_camera_device", return_value="cam-a"),
-            mock.patch.object(self.monitor_service, "get_profile_frame_size", return_value=(1920, 1080)),
             mock.patch.object(self.monitor_service, "get_profile_fps", return_value=30),
             mock.patch.object(self.monitor_service, "build_capture_input_candidates", return_value=[SimpleNamespace(token="video=cam-a", is_virtual=False)]),
             mock.patch.object(self.monitor_service, "_ensure_global_capture", side_effect=fail_once),
@@ -290,7 +292,6 @@ class MonitorCaptureTests(unittest.TestCase):
             mock.patch.object(self.monitor_service, "resume_preview_after_monitoring"),
             mock.patch.object(self.monitor_service, "get_profile_dirs"),
             mock.patch.object(self.monitor_service, "get_profile_camera_device", return_value="cam-a"),
-            mock.patch.object(self.monitor_service, "get_profile_frame_size", return_value=(640, 480)),
             mock.patch.object(self.monitor_service, "get_profile_fps", return_value=30),
             mock.patch.object(self.monitor_service, "build_capture_input_candidates", return_value=[SimpleNamespace(token="video=cam-a", is_virtual=True)]),
             mock.patch.object(self.monitor_service, "_ensure_global_capture", side_effect=self._fail_capture_once),
@@ -309,6 +310,54 @@ class MonitorCaptureTests(unittest.TestCase):
         self.assertTrue(any(m.startswith("Monitoring failed:") for m in messages))
         self.assertIn("FAILED", states)
         self.assertGreaterEqual(release_mock.call_count, 3)
+
+
+@unittest.skipUnless(CV2_AVAILABLE, "OpenCV unavailable in test environment")
+class MonitorPreviewLifecycleTests(unittest.TestCase):
+    """Preview lifecycle tests under the monitor service import gate."""
+
+    def setUp(self):
+        import app.services.monitor_service as monitor_service
+
+        self.monitor_service = monitor_service
+        _reset_globals(monitor_service)
+
+    def tearDown(self):
+        _reset_globals(self.monitor_service)
+
+    def test_virtual_preview_uses_single_retry(self):
+        calls = {"count": 0}
+
+        def side_effect(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return False, "Preview failed: device busy"
+            return True, None
+
+        with mock.patch.object(self.monitor_service, "build_capture_input_candidates", return_value=[SimpleNamespace(token="video=cam-a", is_virtual=True)]):
+            with mock.patch.object(self.monitor_service, "_ensure_preview_capture", side_effect=side_effect):
+                with mock.patch.object(self.monitor_service.time, "sleep", return_value=None):
+                    ok, reason = self.monitor_service.start_preview_for_selected_camera("cam-a", 640, 480, 30)
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+        self.assertEqual(calls["count"], 2)
+
+    def test_preview_stops_on_ffmpeg_death(self):
+        class DeadCapture:
+            def is_alive(self):
+                return False
+
+        self.monitor_service._PREVIEW_LIVE_ENABLED = True
+        self.monitor_service._PREVIEW_CAPTURE = DeadCapture()
+        expected = (123.0, b"static")
+        self.monitor_service._PREVIEW_STATIC_FRAME = expected
+
+        with mock.patch.object(self.monitor_service, "release_preview_capture") as release_mock:
+            frame = self.monitor_service.get_latest_preview_frame()
+
+        self.assertEqual(frame, expected)
+        self.assertFalse(self.monitor_service._PREVIEW_LIVE_ENABLED)
+        release_mock.assert_called_once()
 
 
 if __name__ == "__main__":

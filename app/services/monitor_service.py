@@ -20,14 +20,13 @@ from app.services.frame_bus import FrameQueue
 from app.services.frame_consumers import DetectionConsumer, MetricsConsumer, SnapshotConsumer
 from app.services.monitor_state_machine import InvalidTransition, MonitoringState, MonitoringStateMachine
 from app.services.monitor_pipeline import FfmpegCapture
+from app.services.capture_constants import CANONICAL_FPS, CANONICAL_HEIGHT, CANONICAL_WIDTH
 from core import detector as dect
 from core import notifier as notif
 from core.profiles import (
     get_profile_camera_device,
     get_profile_dirs,
     get_profile_fps,
-    get_profile_frame_size,
-    get_profile_frame_size_fallback,
     set_profile_camera_device,
 )
 
@@ -252,9 +251,10 @@ def release_preview_capture() -> None:
 
 
 def pause_preview_for_monitoring() -> None:
-    global _PREVIEW_PAUSED_FOR_MONITORING, _PREVIEW_STATIC_FRAME
+    global _PREVIEW_LIVE_ENABLED, _PREVIEW_PAUSED_FOR_MONITORING, _PREVIEW_STATIC_FRAME
     with _PREVIEW_LOCK:
         _PREVIEW_PAUSED_FOR_MONITORING = True
+        _PREVIEW_LIVE_ENABLED = False
         if _PREVIEW_QUEUE:
             packet = _PREVIEW_QUEUE.peek_latest()
             if packet is not None and _PREVIEW_CONFIG:
@@ -291,6 +291,8 @@ def capture_preview_snapshot(selected_display_name: str, width: int, height: int
         if _PREVIEW_PAUSED_FOR_MONITORING:
             return False, "Preview paused while monitoring is active"
 
+    width = CANONICAL_WIDTH
+    height = CANONICAL_HEIGHT
     attempts = _PREVIEW_MAX_RETRIES
     last_reason = "Camera preview unavailable"
     for attempt in range(1, attempts + 1):
@@ -340,50 +342,59 @@ def start_preview_for_selected_camera(selected_display_name: str, width: int, he
         return False, "Preview failed: selected camera not found"
 
     candidate = candidates[0]
-    configs = _build_monitoring_config_ladder(width, height, min(15, fps), is_virtual=candidate.is_virtual)
-    attempts = min(_PREVIEW_MAX_RETRIES, len(configs))
-    last_reason = "unknown preview failure"
-
-    for attempt in range(1, attempts + 1):
-        config = configs[attempt - 1]
-        try:
-            started, skip_reason = _ensure_preview_capture(candidate.token, config, allow_input_tuning=not candidate.is_virtual)
-        except FfmpegNotFoundError as exc:
-            return False, f"Preview failed: FFmpeg not found ({exc})"
-        except Exception as exc:
-            logging.warning("[CAM_PREVIEW] failed to start", exc_info=True)
-            return False, f"Preview failed: {exc}"
-
-        if not started:
-            last_reason = skip_reason or last_reason
-            if "owned by" in (skip_reason or ""):
-                return False, skip_reason
-            if attempt < attempts:
-                time.sleep(_CAMERA_REOPEN_COOLDOWN_SEC)
-            continue
-
-        time.sleep(0.15)
-        with _PREVIEW_LOCK:
-            if _PREVIEW_CAPTURE and _PREVIEW_CAPTURE.is_alive():
-                _PREVIEW_STATIC_FRAME = None
-                return True, None
-            reason = _PREVIEW_CAPTURE.last_error if _PREVIEW_CAPTURE else "ffmpeg exited"
-            last_reason = reason or "ffmpeg exited"
-
-        if attempt < attempts:
-            release_preview_capture()
+    config = CaptureConfig(
+        width=CANONICAL_WIDTH,
+        height=CANONICAL_HEIGHT,
+        fps=CANONICAL_FPS,
+        input_width=None,
+        input_height=None,
+        input_fps=None,
+    )
+    try:
+        started, skip_reason = _ensure_preview_capture(candidate.token, config, allow_input_tuning=False)
+        if (not started and candidate.is_virtual and skip_reason and "busy" in skip_reason.lower()):
             time.sleep(_CAMERA_REOPEN_COOLDOWN_SEC)
+            started, skip_reason = _ensure_preview_capture(candidate.token, config, allow_input_tuning=False)
+    except FfmpegNotFoundError as exc:
+        return False, f"Preview failed: FFmpeg not found ({exc})"
+    except Exception as exc:
+        logging.warning("[CAM_PREVIEW] failed to start", exc_info=True)
+        return False, f"Preview failed: {exc}"
 
-    return False, f"Preview failed: {last_reason}"
+    if not started:
+        return False, skip_reason or "Preview failed"
+
+    time.sleep(0.15)
+    with _PREVIEW_LOCK:
+        if _PREVIEW_CAPTURE and _PREVIEW_CAPTURE.is_alive():
+            _PREVIEW_STATIC_FRAME = None
+            return True, None
+        reason = _PREVIEW_CAPTURE.last_error if _PREVIEW_CAPTURE else "ffmpeg exited"
+        return False, f"Preview failed: {reason or 'ffmpeg exited'}"
 
 
 def get_latest_preview_frame():
+    global _PREVIEW_LIVE_ENABLED
+    should_release = False
     with _PREVIEW_LOCK:
-        if _PREVIEW_LIVE_ENABLED and _PREVIEW_QUEUE:
-            packet = _PREVIEW_QUEUE.peek_latest()
-            if packet is not None:
-                return (packet.timestamp, packet.payload)
-        return _PREVIEW_STATIC_FRAME
+        if _PREVIEW_LIVE_ENABLED:
+            if _PREVIEW_CAPTURE is None or not _PREVIEW_CAPTURE.is_alive():
+                _PREVIEW_LIVE_ENABLED = False
+                should_release = True
+                static_frame = _PREVIEW_STATIC_FRAME
+            elif _PREVIEW_QUEUE:
+                packet = _PREVIEW_QUEUE.peek_latest()
+                if packet is not None:
+                    return (packet.timestamp, packet.payload)
+                static_frame = _PREVIEW_STATIC_FRAME
+            else:
+                static_frame = _PREVIEW_STATIC_FRAME
+        else:
+            return _PREVIEW_STATIC_FRAME
+
+    if should_release:
+        release_preview_capture()
+    return static_frame
 
 
 def get_preview_frame_shape() -> tuple[int, int] | None:
@@ -487,12 +498,8 @@ class MonitorService(QThread):
                 return
 
             candidate = input_candidates[0]
-            width, height = get_profile_frame_size(profile)
-            if not width or not height:
-                width, height = get_profile_frame_size_fallback()
-            width = min(width or 960, 960)
-            height = min(height or 540, 540)
-            fps = min(15, max(1, get_profile_fps(profile)))
+            width, height = CANONICAL_WIDTH, CANONICAL_HEIGHT
+            fps = min(CANONICAL_FPS, max(1, get_profile_fps(profile)))
             self._monitor_fps = fps
 
             configs = _build_monitoring_config_ladder(width, height, fps, is_virtual=candidate.is_virtual)

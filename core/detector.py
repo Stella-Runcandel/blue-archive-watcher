@@ -10,6 +10,8 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+
+from app.services.capture_constants import CANONICAL_HEIGHT, CANONICAL_WIDTH
 from core.profiles import (
     DEBUG_EXTENSIONS,
     get_profile_dirs,
@@ -22,7 +24,6 @@ from core import storage
 EXIT_TIMEOUT = 0.6  # seconds dialogue must disappear to reset
 DEBUG_STORAGE_LIMIT_BYTES = 1_073_741_824  # 1 GB
 DEBUG_STORAGE_LIMIT_COUNT = 2000
-DETECTION_SCALE = 0.75
 
 
 # =========================
@@ -260,30 +261,48 @@ def evaluate_frame(profile_name, frame, state: DetectorState, selected_reference
     )
 
     now = time.time()
-    detection_scale = float(DETECTION_SCALE)
-    if detection_scale <= 0.0 or detection_scale > 1.0:
-        detection_scale = 1.0
-    small_frame = cv2.resize(
-        frame_gray,
-        None,
-        fx=detection_scale,
-        fy=detection_scale,
-        interpolation=cv2.INTER_AREA,
-    )
+    expected_h, expected_w = CANONICAL_HEIGHT, CANONICAL_WIDTH
+    if frame_gray.shape[:2] != (expected_h, expected_w):
+        frame_gray = cv2.resize(frame_gray, (expected_w, expected_h), interpolation=cv2.INTER_AREA)
+
+    # ROI HOOK — crop here after canonical resize if ROI is configured
+    roi = None
+    try:
+        roi_x = storage.get_app_state(f"{profile_name}:roi_x")
+        roi_y = storage.get_app_state(f"{profile_name}:roi_y")
+        roi_w = storage.get_app_state(f"{profile_name}:roi_w")
+        roi_h = storage.get_app_state(f"{profile_name}:roi_h")
+        if None not in (roi_x, roi_y, roi_w, roi_h):
+            roi_x = int(roi_x)
+            roi_y = int(roi_y)
+            roi_w = int(roi_w)
+            roi_h = int(roi_h)
+            if roi_w >= 10 and roi_h >= 10:
+                x0 = max(0, min(roi_x, CANONICAL_WIDTH - 1))
+                y0 = max(0, min(roi_y, CANONICAL_HEIGHT - 1))
+                x1 = max(x0 + 1, min(roi_x + roi_w, CANONICAL_WIDTH))
+                y1 = max(y0 + 1, min(roi_y + roi_h, CANONICAL_HEIGHT))
+                clamped_w = x1 - x0
+                clamped_h = y1 - y0
+                if clamped_w >= 10 and clamped_h >= 10:
+                    roi = (x0, y0, clamped_w, clamped_h)
+    except Exception:
+        roi = None
+
+    processed_frame = frame_gray
+    if roi is not None:
+        roi_x, roi_y, roi_w, roi_h = roi
+        processed_frame = frame_gray[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
+
     matched_ref, match_bbox, confidence = _find_best_match(
         profile_name,
-        small_frame,
+        processed_frame,
         selected_reference,
     )
-    if match_bbox is not None and detection_scale != 1.0:
-        inv = 1.0 / detection_scale
+    if match_bbox is not None and roi is not None:
+        roi_x, roi_y, _, _ = roi
         x, y, w, h = match_bbox
-        match_bbox = (
-            int(round(x * inv)),
-            int(round(y * inv)),
-            int(round(w * inv)),
-            int(round(h * inv)),
-        )
+        match_bbox = (x + roi_x, y + roi_y, w, h)
 
     if matched_ref is not None:
         state.last_seen_time = now
@@ -297,6 +316,9 @@ def evaluate_frame(profile_name, frame, state: DetectorState, selected_reference
 
         if event_start:
             debug = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
+            if roi is not None:
+                roi_x, roi_y, roi_w, roi_h = roi
+                cv2.rectangle(debug, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (96, 96, 96), 1)
             x, y, w, h = match_bbox
             cv2.rectangle(debug, (x, y), (x + w, y + h), (0, 255, 0), 2)
 

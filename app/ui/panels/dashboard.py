@@ -19,13 +19,13 @@ from PyQt6.QtWidgets import (
 from app.app_state import app_state
 from app.controllers.monitor_controller import MonitorController
 from app.services.ffmpeg_tools import list_camera_devices
+from app.services.capture_constants import CANONICAL_HEIGHT, CANONICAL_WIDTH
 from app.services.monitor_service import (
     MonitorService,
     capture_preview_snapshot,
     freeze_latest_global_frame,
     get_latest_global_frame,
     get_latest_preview_frame,
-    get_preview_frame_shape,
     pause_preview_for_monitoring,
     release_preview_capture,
     set_preview_live_enabled,
@@ -40,8 +40,6 @@ from core.profiles import (
     get_profile_camera_device,
     get_profile_dirs,
     get_profile_fps,
-    get_profile_frame_size,
-    get_profile_frame_size_fallback,
     get_profile_icon_bytes,
     list_profiles,
     set_profile_camera_device,
@@ -51,8 +49,8 @@ from core.profiles import (
 
 
 class DashboardPanel(QWidget):
-    MAX_PREVIEW_WIDTH = 640
-    MAX_PREVIEW_HEIGHT = 360
+    MAX_PREVIEW_WIDTH = CANONICAL_WIDTH
+    MAX_PREVIEW_HEIGHT = CANONICAL_HEIGHT
     DEBUG_FLASH_SECONDS = 1.0
 
     STRICTNESS_OPTIONS = [
@@ -248,6 +246,7 @@ class DashboardPanel(QWidget):
         self._last_preview_timestamp = None
         self._updating_camera_combo = False
         self._preview_last_valid_frame_time = 0.0
+        self._preview_payload_mismatch_warning_emitted = False
         set_preview_live_enabled(False)
         self.refresh_camera_devices()
         self.refresh()
@@ -280,6 +279,7 @@ class DashboardPanel(QWidget):
             self.status_label.setText("Select a reference first")
             return
         self._frozen_frame = None
+        self._set_live_preview_enabled(False)
         pause_preview_for_monitoring()
         self.preview_timer.stop()
         self.refresh_camera_devices()
@@ -445,6 +445,7 @@ class DashboardPanel(QWidget):
         set_profile_camera_device(app_state.active_profile, clean_name)
         self._last_preview_timestamp = None
         self._preview_last_valid_frame_time = 0.0
+        self._preview_payload_mismatch_warning_emitted = False
         self._frozen_frame = None
         release_preview_capture()
         self.ensure_preview_capture()
@@ -506,6 +507,10 @@ class DashboardPanel(QWidget):
         else:
             logging.warning("Ignoring debug flash frame with unsupported shape: %s", getattr(frame, "shape", None))
             return
+        if frame.shape[:2] != (CANONICAL_HEIGHT, CANONICAL_WIDTH):
+            import cv2
+
+            frame = cv2.resize(frame, (CANONICAL_WIDTH, CANONICAL_HEIGHT), interpolation=cv2.INTER_AREA)
         self._match_flash_frame = (mode, np.ascontiguousarray(frame))
         self._match_flash_expiry = time.time() + self.DEBUG_FLASH_SECONDS
         self._last_preview_timestamp = None
@@ -549,15 +554,8 @@ class DashboardPanel(QWidget):
 
     def _preview_target_config(self):
         profile = app_state.active_profile
-        frame_shape = get_preview_frame_shape()
-        if frame_shape is not None:
-            width, height = frame_shape
-        else:
-            width, height = get_profile_frame_size(profile)
-            if not width or not height:
-                width, height = get_profile_frame_size_fallback()
-        width = min(width, self.MAX_PREVIEW_WIDTH)
-        height = min(height, self.MAX_PREVIEW_HEIGHT)
+        width = self.MAX_PREVIEW_WIDTH
+        height = self.MAX_PREVIEW_HEIGHT
         fps = min(15, max(1, get_profile_fps(profile)))
         return width, height, fps
 
@@ -571,32 +569,17 @@ class DashboardPanel(QWidget):
             return None
 
         arr = np.frombuffer(payload, dtype=np.uint8)
-        known_shape = get_preview_frame_shape()
-        if known_shape:
-            known_width, known_height = known_shape
-            if arr.size == known_width * known_height:
-                try:
-                    return arr.reshape((known_height, known_width))
-                except ValueError:
-                    logging.warning("Failed to reshape payload with preview config %sx%s", known_width, known_height)
-
-        fallback_width, fallback_height = get_profile_frame_size_fallback()
-        if arr.size == fallback_width * fallback_height:
-            try:
-                return arr.reshape((fallback_height, fallback_width))
-            except ValueError:
-                logging.warning("Failed to reshape payload with fallback config %sx%s", fallback_width, fallback_height)
-
-        # Last resort: only infer perfect-square payloads safely.
-        side = int(arr.size ** 0.5)
-        if side > 0 and side * side == arr.size:
-            try:
-                return arr.reshape((side, side))
-            except ValueError:
-                logging.warning("Failed to reshape payload using inferred square side=%s", side)
-
-        logging.warning("Unexpected grayscale payload size: %s", arr.size)
-        return None
+        expected = CANONICAL_WIDTH * CANONICAL_HEIGHT
+        if arr.size != expected:
+            if not self._preview_payload_mismatch_warning_emitted:
+                logging.warning("Preview payload size mismatch — expected canonical resolution")
+                self._preview_payload_mismatch_warning_emitted = True
+            return None
+        try:
+            return arr.reshape((CANONICAL_HEIGHT, CANONICAL_WIDTH))
+        except ValueError:
+            logging.warning("Failed to reshape payload with canonical config %sx%s", CANONICAL_WIDTH, CANONICAL_HEIGHT)
+            return None
 
     def _save_snapshot_frame(self, frame_item):
         if not app_state.active_profile or frame_item is None:
@@ -646,6 +629,7 @@ class DashboardPanel(QWidget):
         if enabled:
             ok, message = start_preview_for_selected_camera(selected_camera, width, height, fps)
         else:
+            release_preview_capture()
             ok, message = capture_preview_snapshot(selected_camera, width, height)
 
         if not ok:
