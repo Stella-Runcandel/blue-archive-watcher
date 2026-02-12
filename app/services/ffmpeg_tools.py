@@ -32,6 +32,22 @@ class CaptureConfig:
     input_height: int | None = None
     input_fps: int | None = None
     label: str = "requested"
+    min_width: int | None = None
+    min_height: int | None = None
+    max_width: int | None = None
+    max_height: int | None = None
+    enforce_minimum: bool = False
+    enforce_maximum: bool = False
+
+    def is_equivalent_for_capture(self, other: "CaptureConfig") -> bool:
+        return (
+            self.width == other.width
+            and self.height == other.height
+            and self.fps == other.fps
+            and self.input_width == other.input_width
+            and self.input_height == other.input_height
+            and self.input_fps == other.input_fps
+        )
 
 
 @dataclass(frozen=True)
@@ -186,6 +202,24 @@ def build_ffmpeg_capture_command(
     pipeline: str = "monitoring",
 ):
     ffmpeg_loglevel = "verbose" if ffmpeg_debug_enabled() else "warning"
+    width = int(config.width)
+    height = int(config.height)
+    if config.enforce_minimum:
+        if config.min_width is not None:
+            width = max(width, int(config.min_width))
+        if config.min_height is not None:
+            height = max(height, int(config.min_height))
+    if config.enforce_maximum:
+        if config.max_width is not None:
+            width = min(width, int(config.max_width))
+        if config.max_height is not None:
+            height = min(height, int(config.max_height))
+
+    vf_filters = [
+        f"fps={max(1, int(config.fps))}",
+        f"scale={width}:{height}:flags=fast_bilinear",
+        "format=gray",
+    ]
     cmd = [
         resolve_ffmpeg_path(),
         "-hide_banner",
@@ -209,12 +243,10 @@ def build_ffmpeg_capture_command(
         cmd.extend(["-framerate", str(config.input_fps)])
 
     cmd.extend(["-i", input_token])
-    cmd.extend(["-vf", f"scale={config.width}:{config.height}:flags=fast_bilinear"])
+    cmd.extend(["-vf", ",".join(vf_filters)])
     cmd.extend([
-        "-r",
-        str(config.fps),
         "-pix_fmt",
-        "bgr24",
+        "gray",
         "-f",
         "rawvideo",
         "pipe:1",
@@ -250,8 +282,10 @@ def capture_single_frame(device_name: str, width: int, height: int, fps: int):
         token,
         "-frames:v",
         "1",
+        "-vf",
+        "format=gray",
         "-pix_fmt",
-        "bgr24",
+        "gray",
         "-f",
         "rawvideo",
         "pipe:1",
@@ -267,7 +301,7 @@ def capture_single_frame(device_name: str, width: int, height: int, fps: int):
 
 
 def capture_single_frame_by_token(input_token: str, *, width: int | None = None, height: int | None = None):
-    """Capture exactly one raw BGR frame from a resolved dshow token."""
+    """Capture exactly one raw grayscale frame from a resolved dshow token."""
     args = [
         resolve_ffmpeg_path(),
         "-hide_banner",
@@ -284,8 +318,10 @@ def capture_single_frame_by_token(input_token: str, *, width: int | None = None,
     args.extend([
         "-frames:v",
         "1",
+        "-vf",
+        "format=gray",
         "-pix_fmt",
-        "bgr24",
+        "gray",
         "-f",
         "rawvideo",
         "pipe:1",

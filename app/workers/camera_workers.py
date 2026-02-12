@@ -66,19 +66,18 @@ class CameraSnapshotWorker(QThread):
             return
 
         frame = np.frombuffer(raw, dtype=np.uint8)
-        expected = self.width * self.height * 3
+        expected = self.width * self.height
         if frame.size != expected:
             self.snapshotFailed.emit("Snapshot size mismatch")
             return
 
-        frame = frame.reshape((self.height, self.width, 3))
-        frame = frame[:, :, ::-1]
+        gray = frame.reshape((self.height, self.width))
         image = QImage(
-            frame.data,
+            gray.data,
             self.width,
             self.height,
-            self.width * 3,
-            QImage.Format.Format_RGB888,
+            self.width,
+            QImage.Format.Format_Grayscale8,
         ).copy()
 
         self.snapshotReady.emit(image)

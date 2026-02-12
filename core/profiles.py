@@ -16,10 +16,10 @@ DEBUG_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 DEFAULT_DETECTION_THRESHOLD = 0.70
 MIN_DETECTION_THRESHOLD = 0.50
 MAX_DETECTION_THRESHOLD = 0.95
-DEFAULT_TARGET_FPS = 30
+DEFAULT_TARGET_FPS = 15
 MIN_TARGET_FPS = 1
 MAX_TARGET_FPS = 60
-DEFAULT_FRAME_SIZE = (1280, 720)
+DEFAULT_FRAME_SIZE = (960, 540)
 
 def profile_path(name):
     """Return filesystem path for a profile root directory."""

@@ -61,6 +61,13 @@ _LAST_CAMERA_RELEASE_AT = 0.0
 
 def _emit_capture_event(payload: dict) -> None:
     try:
+        severity = str(payload.get("severity", "INFO")).upper()
+        pipeline = str(payload.get("pipeline", ""))
+        if severity == "INFO" and pipeline == "monitoring":
+            return
+        if severity in {"ERROR", "WARNING"}:
+            logging.getLogger("camera.capture").warning("event=%s", payload)
+            return
         logging.getLogger("camera.capture").info("event=%s", payload)
     except Exception:
         # Logging must be best-effort and never break capture control flow.
@@ -118,7 +125,7 @@ def _ensure_global_capture(
     with _GLOBAL_LOCK:
         if _GLOBAL_CAPTURE and _GLOBAL_CAPTURE.is_alive():
             same_token = _GLOBAL_INPUT_TOKEN == input_token
-            same_config = _GLOBAL_CONFIG == config
+            same_config = _GLOBAL_CONFIG.is_equivalent_for_capture(config)
             if same_token and same_config:
                 _GLOBAL_USERS += 1
                 return _GLOBAL_CAPTURE, _GLOBAL_QUEUE
@@ -136,7 +143,7 @@ def _ensure_global_capture(
             _release_camera_owner("monitoring", input_token)
             raise RuntimeError("camera reopen cooldown interrupted")
 
-        _GLOBAL_QUEUE = FrameQueue(maxlen=8)
+        _GLOBAL_QUEUE = FrameQueue(maxlen=3)
         try:
             _GLOBAL_CAPTURE = FfmpegCapture(
                 input_token=input_token,
@@ -192,7 +199,7 @@ def _ensure_preview_capture(input_token: str, config: CaptureConfig, *, allow_in
         if _ACTIVE_OWNER_PIPELINE == "monitoring":
             return False, "Camera is currently owned by monitoring"
 
-        if _PREVIEW_CAPTURE and _PREVIEW_CAPTURE.is_alive() and _PREVIEW_INPUT_TOKEN == input_token and _PREVIEW_CONFIG == config:
+        if _PREVIEW_CAPTURE and _PREVIEW_CAPTURE.is_alive() and _PREVIEW_INPUT_TOKEN == input_token and _PREVIEW_CONFIG is not None and _PREVIEW_CONFIG.is_equivalent_for_capture(config):
             return True, None
 
         now = time.time()
@@ -214,7 +221,7 @@ def _ensure_preview_capture(input_token: str, config: CaptureConfig, *, allow_in
             _release_camera_owner("preview", input_token)
             return False, "Preview cooldown interrupted"
 
-        _PREVIEW_QUEUE = FrameQueue(maxlen=5)
+        _PREVIEW_QUEUE = FrameQueue(maxlen=3)
         _PREVIEW_CAPTURE = FfmpegCapture(
             input_token=input_token,
             config=config,
@@ -245,11 +252,19 @@ def release_preview_capture() -> None:
 
 
 def pause_preview_for_monitoring() -> None:
-    global _PREVIEW_PAUSED_FOR_MONITORING, _PREVIEW_STATIC_FRAME, _PREVIEW_CONFIG
+    global _PREVIEW_PAUSED_FOR_MONITORING, _PREVIEW_STATIC_FRAME
     with _PREVIEW_LOCK:
         _PREVIEW_PAUSED_FOR_MONITORING = True
-        _PREVIEW_STATIC_FRAME = None
-        _PREVIEW_CONFIG = None
+        if _PREVIEW_QUEUE:
+            packet = _PREVIEW_QUEUE.peek_latest()
+            if packet is not None and _PREVIEW_CONFIG:
+                arr = np.frombuffer(packet.payload, dtype=np.uint8)
+                expected = _PREVIEW_CONFIG.width * _PREVIEW_CONFIG.height
+                if arr.size == expected:
+                    _PREVIEW_STATIC_FRAME = (
+                        packet.timestamp,
+                        arr.reshape((_PREVIEW_CONFIG.height, _PREVIEW_CONFIG.width)).copy(),
+                    )
     logging.info("[CAM_PREVIEW] pause for monitoring")
     release_preview_capture()
 
@@ -288,11 +303,11 @@ def capture_preview_snapshot(selected_display_name: str, width: int, height: int
                 continue
             raw = capture_single_frame_by_token(candidate.token, width=width, height=height)
             arr = np.frombuffer(raw, dtype=np.uint8)
-            expected = width * height * 3
+            expected = width * height
             if arr.size != expected:
                 last_reason = "Camera preview unavailable"
                 continue
-            frame = arr.reshape((height, width, 3)).copy()
+            frame = arr.reshape((height, width)).copy()
             with _PREVIEW_LOCK:
                 _PREVIEW_STATIC_FRAME = (time.time(), frame)
                 _PREVIEW_CONFIG = CaptureConfig(width=width, height=height, fps=1, label="snapshot")
@@ -325,7 +340,7 @@ def start_preview_for_selected_camera(selected_display_name: str, width: int, he
         return False, "Preview failed: selected camera not found"
 
     candidate = candidates[0]
-    configs = _build_monitoring_config_ladder(width, height, min(30, fps), is_virtual=candidate.is_virtual)
+    configs = _build_monitoring_config_ladder(width, height, min(15, fps), is_virtual=candidate.is_virtual)
     attempts = min(_PREVIEW_MAX_RETRIES, len(configs))
     last_reason = "unknown preview failure"
 
@@ -364,13 +379,10 @@ def start_preview_for_selected_camera(selected_display_name: str, width: int, he
 
 def get_latest_preview_frame():
     with _PREVIEW_LOCK:
-        if _PREVIEW_LIVE_ENABLED:
-            if not _PREVIEW_QUEUE:
-                return None
+        if _PREVIEW_LIVE_ENABLED and _PREVIEW_QUEUE:
             packet = _PREVIEW_QUEUE.peek_latest()
-            if packet is None:
-                return None
-            return (packet.timestamp, packet.payload)
+            if packet is not None:
+                return (packet.timestamp, packet.payload)
         return _PREVIEW_STATIC_FRAME
 
 
@@ -408,6 +420,7 @@ class MonitorService(QThread):
     status = pyqtSignal(str)
     metrics = pyqtSignal(dict)
     state_changed = pyqtSignal(str)
+    match_debug_frame = pyqtSignal(object)
 
     def __init__(self):
         super().__init__()
@@ -477,10 +490,10 @@ class MonitorService(QThread):
             width, height = get_profile_frame_size(profile)
             if not width or not height:
                 width, height = get_profile_frame_size_fallback()
-            width = min(width or 1280, 1280)
-            height = min(height or 720, 720)
-            fps = get_profile_fps(profile)
-            self._monitor_fps = max(1, fps)
+            width = min(width or 960, 960)
+            height = min(height or 540, 540)
+            fps = min(15, max(1, get_profile_fps(profile)))
+            self._monitor_fps = fps
 
             configs = _build_monitoring_config_ladder(width, height, fps, is_virtual=candidate.is_virtual)
             max_retries = 2
@@ -611,13 +624,13 @@ class MonitorService(QThread):
             self._metrics.on_frame()
             raw = pkt.payload
             frame = np.frombuffer(raw, dtype=np.uint8)
-            expected = width * height * 3
+            expected = width * height
             if frame.size != expected:
                 continue
             if self._detection_consumer.is_paused():
                 continue
 
-            frame = frame.reshape((height, width, 3))
+            frame = frame.reshape((height, width))
             result = dect.evaluate_frame(
                 profile,
                 frame,
@@ -628,6 +641,8 @@ class MonitorService(QThread):
             if result.matched:
                 self.status.emit("Dialogue detected!")
                 last_detection_time = result.timestamp
+                if result.event_start and result.debug_frame is not None:
+                    self.match_debug_frame.emit(result.debug_frame)
                 try:
                     notif.alert()
                 except Exception:

@@ -199,7 +199,7 @@ class MonitorCaptureTests(unittest.TestCase):
 
     def test_snapshot_preview_releases_camera_owner(self):
         with mock.patch.object(self.monitor_service, "build_capture_input_candidates", return_value=[SimpleNamespace(token="video=cam-a", is_virtual=False)]):
-            with mock.patch.object(self.monitor_service, "capture_single_frame_by_token", return_value=b"x" * (640 * 480 * 3)):
+            with mock.patch.object(self.monitor_service, "capture_single_frame_by_token", return_value=b"x" * (640 * 480)):
                 ok, reason = self.monitor_service.capture_preview_snapshot("cam-a", 640, 480)
         self.assertTrue(ok)
         self.assertIsNone(reason)
@@ -211,7 +211,7 @@ class MonitorCaptureTests(unittest.TestCase):
         return cap, queue
 
 
-    def test_monitoring_caps_resolution_to_1280x720(self):
+    def test_monitoring_caps_resolution_to_960x540(self):
         service = self.monitor_service.MonitorService()
         seen = {}
 
@@ -238,10 +238,10 @@ class MonitorCaptureTests(unittest.TestCase):
             app_state.selected_reference = "ref"
             service.run()
 
-        self.assertEqual(seen["config"].width, 1280)
-        self.assertEqual(seen["config"].height, 720)
-        self.assertEqual(seen["config"].input_width, 1280)
-        self.assertEqual(seen["config"].input_height, 720)
+        self.assertEqual(seen["config"].width, 960)
+        self.assertEqual(seen["config"].height, 540)
+        self.assertEqual(seen["config"].input_width, 960)
+        self.assertEqual(seen["config"].input_height, 540)
 
     def test_processing_loop_uses_resolved_monitor_fps(self):
         service = self.monitor_service.MonitorService()
@@ -257,7 +257,7 @@ class MonitorCaptureTests(unittest.TestCase):
             def get(self, timeout=0.5):
                 self._calls += 1
                 if self._calls <= 2:
-                    return self.monitor_service.FramePacket(1.0, b"\x00" * (2 * 2 * 3))
+                    return self.monitor_service.FramePacket(1.0, b"\x00" * (2 * 2))
                 service._stop_event.set()
                 return None
 
