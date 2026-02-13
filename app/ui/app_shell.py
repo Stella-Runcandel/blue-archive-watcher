@@ -18,6 +18,7 @@ from app.ui.panels.references import ReferencesPanel
 from app.ui.panels.profile_selector import ProfileSelectorPanel
 from app.ui.panels.debug import DebugPanel
 from app.ui.panels.frames import FramesPanel
+from app.ui.panels.parameters import ParametersPanel
 from core import storage
 from core.profiles import list_profiles
 
@@ -68,6 +69,9 @@ class AppShell(QWidget):
         )
         self.nav_bar.frames_btn.clicked.connect(
             lambda: self.nav.push(FramesPanel(self.nav), "frames")
+        )
+        self.nav_bar.parameters_btn.clicked.connect(
+            lambda: self.nav.push(ParametersPanel(self.nav), "parameters")
         )
 
     def load_app_icon(self):

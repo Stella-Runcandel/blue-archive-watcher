@@ -19,6 +19,8 @@ class NavigationController:
 
         # remove current widget
         current_widget = self.stack.currentWidget()
+        if hasattr(current_widget, "on_panel_close"):
+            current_widget.on_panel_close()
         self.stack.removeWidget(current_widget)
         current_widget.deleteLater()
 

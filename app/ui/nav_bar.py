@@ -13,12 +13,14 @@ class NavBar(QWidget):
         self.frames_btn = QPushButton("🖼 Frames")
         self.refs_btn = QPushButton("✂ References")
         self.debug_btn = QPushButton("🐞 Debug")
+        self.parameters_btn = QPushButton("⚙ Parameters")
 
         layout = QVBoxLayout()
         layout.addWidget(self.profile_btn)
         layout.addWidget(self.frames_btn)
         layout.addWidget(self.refs_btn)
         layout.addWidget(self.debug_btn)
+        layout.addWidget(self.parameters_btn)
         layout.addStretch()
         self.setLayout(layout)
         self.setFixedWidth(140)
@@ -34,6 +36,7 @@ class NavBar(QWidget):
             self.frames_btn,
             self.refs_btn,
             self.debug_btn,
+            self.parameters_btn,
         ]:
             button.setStyleSheet(btn_style)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)

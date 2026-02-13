@@ -85,8 +85,14 @@ class DetectionResult:
     confidence: float
     reference: str | None
     timestamp: float
+    bbox: tuple[int, int, int, int] | None = None
     event_start: bool = False
     debug_frame: object = None
+
+
+@dataclass(frozen=True)
+class DetectionConfig:
+    detection_threshold: float | None = None
 
 
 # =========================
@@ -260,7 +266,12 @@ def reference_selector(profile_name):
 # Detection core
 # =========================
 
-def _find_best_match(profile_name, frame_gray, selected_reference: str | None = None):
+def _find_best_match(
+    profile_name,
+    frame_gray,
+    selected_reference: str | None = None,
+    threshold_override: float | None = None,
+):
     """Return best matching reference and confidence score for a frame.
 
     Coarse→fine strategy:
@@ -278,7 +289,7 @@ def _find_best_match(profile_name, frame_gray, selected_reference: str | None = 
     best_ref = None
     best_bbox = None
     best_score = 0.0
-    threshold = get_detection_threshold(profile_name)
+    threshold = float(threshold_override) if threshold_override is not None else get_detection_threshold(profile_name)
     coarse_threshold = max(COARSE_THRESHOLD_FLOOR, threshold * COARSE_THRESHOLD_FACTOR)
     fw, fh = frame_e.shape[1], frame_e.shape[0]
     coarse_time_ms = 0.0
@@ -349,7 +360,14 @@ def _find_best_match(profile_name, frame_gray, selected_reference: str | None = 
     return None, None, best_score
 
 
-def evaluate_frame(profile_name, frame, state: DetectorState, selected_reference: str | None = None):
+def evaluate_frame(
+    profile_name,
+    frame,
+    state: DetectorState,
+    selected_reference: str | None = None,
+    config: DetectionConfig | None = None,
+    sandbox_mode: bool = False,
+):
     """Evaluate a frame deterministically and return match metadata."""
     if not profile_name or frame is None:
         return DetectionResult(False, 0.0, None, time.time())
@@ -400,6 +418,7 @@ def evaluate_frame(profile_name, frame, state: DetectorState, selected_reference
         profile_name,
         processed_frame,
         selected_reference,
+        threshold_override=config.detection_threshold if config else None,
     )
     state.last_match_time_ms = (time.perf_counter() - match_started) * 1000.0
     if ENABLE_DEBUG_LOGGING and LOGGER.isEnabledFor(logging.DEBUG):
@@ -429,7 +448,7 @@ def evaluate_frame(profile_name, frame, state: DetectorState, selected_reference
             x, y, w, h = match_bbox
             cv2.rectangle(debug, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-            if state.last_debug_frame is None or not _debug_images_similar(debug, state.last_debug_frame):
+            if (not sandbox_mode) and (state.last_debug_frame is None or not _debug_images_similar(debug, state.last_debug_frame)):
                 debug_dir = get_debug_dir()
                 if debug_dir:
                     _save_debug_image_if_allowed(
@@ -444,7 +463,15 @@ def evaluate_frame(profile_name, frame, state: DetectorState, selected_reference
         debug_flash = None
         if should_save_debug:
             debug_flash = debug.copy()
-        return DetectionResult(True, float(confidence), matched_ref, now, event_start=event_start, debug_frame=debug_flash)
+        return DetectionResult(
+            True,
+            float(confidence),
+            matched_ref,
+            now,
+            bbox=match_bbox,
+            event_start=event_start,
+            debug_frame=debug_flash,
+        )
 
     if state.active_dialogue and now - state.last_seen_time > EXIT_TIMEOUT:
         state.active_dialogue = None
@@ -454,10 +481,24 @@ def evaluate_frame(profile_name, frame, state: DetectorState, selected_reference
     return DetectionResult(False, float(confidence), None, now)
 
 
-def frame_comp_from_array(profile_name, frame, state: DetectorState, selected_reference: str | None = None):
+def frame_comp_from_array(
+    profile_name,
+    frame,
+    state: DetectorState,
+    selected_reference: str | None = None,
+    config: DetectionConfig | None = None,
+    sandbox_mode: bool = False,
+):
     """Run detection on an in-memory frame. When selected_reference is set, only that reference
     is matched; otherwise all references are checked. Returns True if a match is found."""
-    result = evaluate_frame(profile_name, frame, state, selected_reference=selected_reference)
+    result = evaluate_frame(
+        profile_name,
+        frame,
+        state,
+        selected_reference=selected_reference,
+        config=config,
+        sandbox_mode=sandbox_mode,
+    )
     return result.matched
 
 
