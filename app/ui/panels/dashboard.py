@@ -163,9 +163,10 @@ class DashboardPanel(QWidget):
         )
 
         # Alert assets are loaded from app/assets/alert.mp3 and app/assets/alert.gif.
-        assets_dir = Path(__file__).resolve().parents[2] / "assets"
-        alert_mp3_path = assets_dir / "alert.mp3"
-        alert_gif_path = assets_dir / "alert.gif"
+        from core.paths import APP_ASSETS_DIR
+        alert_mp3_path = APP_ASSETS_DIR / "alert.mp3"
+        alert_gif_path = APP_ASSETS_DIR / "alert.gif"
+
         logging.warning(f"Resolved MP3 path: {alert_mp3_path}")
         logging.warning(f"Resolved GIF path: {alert_gif_path}")
 
