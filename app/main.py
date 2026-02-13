@@ -9,6 +9,11 @@ from PyQt6.QtWidgets import QApplication
 from app.ui.app_shell import AppShell
 from core.logging_setup import setup_logging
 
+import ctypes
+import sys
+
+if sys.platform == "win32":
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("frametrace.app.0.9B")
 
 LIGHT_THEME_STYLESHEET = """
 QWidget {
